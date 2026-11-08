@@ -1,0 +1,2 @@
+comment_id,text,gold_negative,annotator,notes
+（コメントID）,（コメント本文）,1,（判定者）,否定的=1／否定的でない=0。判断に迷ったものは空欄にして notes に理由

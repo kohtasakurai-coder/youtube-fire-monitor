@@ -1,0 +1,11 @@
+[theme]
+base = "light"
+primaryColor = "#C0392B"
+
+[server]
+# アップロードできるCSVの最大サイズ（MB）
+maxUploadSize = 50
+
+[browser]
+# Streamlitへの利用統計の送信を止める
+gatherUsageStats = false

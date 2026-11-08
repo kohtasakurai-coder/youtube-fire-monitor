@@ -1,0 +1,4 @@
+﻿video_id,incident_id,is_fire,fire_start_jst,label_source,split
+SYN_FIRE01,SYN_INC01,1,2026-01-08T06:00:00+09:00,synthetic_generator,demo
+SYN_NORMAL01,SYN_INC02,0,,synthetic_generator,demo
+SYN_NEGNEWS1,SYN_INC03,0,,synthetic_generator,demo

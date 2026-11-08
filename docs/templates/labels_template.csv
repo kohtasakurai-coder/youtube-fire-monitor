@@ -1,0 +1,4 @@
+video_id,incident_id,is_fire,fire_start_jst,label_source,split,comments_file,notes
+（11文字の動画ID）,INC001,1,2026-03-01T14:00:00+09:00,炎上のきっかけを最初に報じた記事のURLと掲載時刻,,data/research/comments_（動画ID）_（取得日時）.csv,
+（11文字の動画ID）,INC001,1,2026-03-01T14:00:00+09:00,同じ事件を別チャンネルが報じた動画（同じincident_id）,,data/research/comments_（動画ID）_（取得日時）.csv,
+（11文字の動画ID）,INC002,0,,否定的な話題だが炎上していないと判断した根拠,,data/research/comments_（動画ID）_（取得日時）.csv,

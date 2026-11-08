@@ -1,0 +1,11 @@
+# Streamlit Community Cloud がこのファイルを読んでライブラリをインストールする。
+# 手元の .venv（Python 3.12.14）で全テストが通ったバージョンに固定している（卒論の再現性のため）。
+# Cloud ではデプロイ時の Advanced settings で Python 3.12 を選ぶ。
+streamlit==1.67.0
+pandas==3.1.1
+numpy==2.5.4
+scipy==1.18.1
+janome==0.5.0
+ruptures==1.1.10
+plotly==7.1.0
+requests==2.34.2

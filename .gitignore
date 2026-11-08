@@ -1,0 +1,29 @@
+# ===== 秘密情報（絶対にGitHubへ上げない） =====
+.env
+.streamlit/secrets.toml
+
+# ===== 実データ・再配布禁止の辞書（GitHubへ上げない） =====
+# YouTubeから収集した実コメントは個人の投稿を含むため公開リポジトリに置かない
+data/research/*
+!data/research/.gitkeep
+# NRC感情辞書などライセンス上再配布できない辞書
+data/dictionaries/private/
+
+# ===== 実験結果（必要なものだけ手動で残す） =====
+results/
+
+# ===== Python =====
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+.pytest_cache/
+*.egg-info/
+
+# ===== OS / エディタ =====
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
+*.sqlite
+*.db

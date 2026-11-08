@@ -1,0 +1,3 @@
+# 開発用（テスト）。Cloudには不要なので requirements.txt と分けている。
+-r requirements.txt
+pytest>=8.0
