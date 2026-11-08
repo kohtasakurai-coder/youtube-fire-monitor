@@ -16,7 +16,10 @@ import pandas as pd
 
 from src.anomaly_detection import (
     _infer_freq,
+    LEVEL_ALERT,
+    LEVEL_RANK,
     alert_levels,
+    judged_bins,
     build_events,
     detect_negative_rate,
     detect_zscore,
@@ -47,8 +50,10 @@ class DetectionResult:
             "first_A": self.first_detection("a_alarm"),
             "first_B": self.first_detection("b_alarm"),
             "first_C": self.first_detection("c_alarm"),
-            "max_level": (t["level"].map({"正常": 0, "注意": 1, "警戒": 2}).max()
-                          if len(t) else 0),
+            # -1 = 判定対象外（判定できた時間帯がなく、検知もない）、0 = 正常、1 = 注意、2 = 警戒
+            "max_level": int(t["level"].map(LEVEL_RANK).max()) if len(t) else -1,
+            "n_judged_bins": int(t["judged"].sum()) if "judged" in t else 0,
+            "n_alert_bins": int((t["level"] == LEVEL_ALERT).sum()) if len(t) else 0,
             "n_offline_cps": len(self.offline_cps),
         }
 
@@ -72,6 +77,8 @@ def run_detection(ts: pd.DataFrame, cfg: AnalysisConfig | None = None,
         for c in ("a_alarm", "b_alarm", "c_alarm"):
             empty[c] = pd.Series(dtype=bool)
         empty["level"] = pd.Series(dtype=object)
+        empty["judged"] = pd.Series(dtype=bool)
+        empty["c_evaluated"] = pd.Series(dtype=bool)
         return DetectionResult(empty, pd.DataFrame(columns=["detected_at", "method", "reason", "level"]),
                                pd.DataFrame(), pd.DataFrame())
     freq = _infer_freq(ts)
@@ -97,7 +104,8 @@ def run_detection(ts: pd.DataFrame, cfg: AnalysisConfig | None = None,
 
     table = pd.concat([ts, a, b, c], axis=1)
     alarms = pd.DataFrame({"A": table["a_alarm"], "B": table["b_alarm"], "C": table["c_alarm"]})
-    table = pd.concat([table, alert_levels(alarms, cfg, freq)], axis=1)
+    judged = judged_bins(table)
+    table = pd.concat([table, judged, alert_levels(alarms, cfg, freq, judged["judged"])], axis=1)
 
     offline = detect_change_points_offline(ts, cfg) if include_offline else pd.DataFrame()
     events = build_events(table, cp_events, cfg)

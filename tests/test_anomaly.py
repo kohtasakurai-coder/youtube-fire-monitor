@@ -236,3 +236,55 @@ def test_future_comments_do_not_change_past_results_end_to_end():
     r_full = run_detection(aggregate_time_series(with_future), CFG)
     n = len(r_past.table)
     pd.testing.assert_frame_equal(_comparable(r_full.table).iloc[:n], _comparable(r_past.table))
+
+
+# ---------------------------------------------------------------- 判定対象外と「正常」の区別
+from src.anomaly_detection import LEVEL_UNJUDGED  # noqa: E402
+
+
+def test_alert_levels_unjudged():
+    idx = pd.date_range("2026-01-01", periods=5, freq="1h", tz="Asia/Tokyo")
+    alarms = pd.DataFrame({"A": [0, 1, 0, 0, 0], "B": [0] * 5, "C": [0] * 5}, index=idx).astype(bool)
+    judged = pd.Series([False, True, False, True, False], index=idx)
+    lv = alert_levels(alarms, CFG, "1h", judged)
+    # 判定なし・検知なし → 判定対象外、直近3時間に検知 → 注意（判定できない時間帯でも）、判定あり → 正常
+    assert list(lv["level"]) == [LEVEL_UNJUDGED, LEVEL_CAUTION, LEVEL_CAUTION, LEVEL_CAUTION, LEVEL_UNJUDGED]
+    lv2 = alert_levels(alarms.iloc[:1], CFG, "1h", judged.iloc[:1] | True)
+    assert list(lv2["level"]) == [LEVEL_NORMAL]
+
+
+def test_history_only_data_is_unjudged_not_normal():
+    """履歴不足だけのデータ（20時間分）：すべて判定対象外で、「正常」は1つもない。"""
+    r = run_detection(make_ts([30] * 20, [3] * 20), CFG)
+    assert not r.table["judged"].any()
+    assert (r.table["level"] == LEVEL_UNJUDGED).all()
+    s = r.summary()
+    assert s["n_judged_bins"] == 0 and s["max_level"] == -1
+
+
+def test_low_count_burst_in_76_seconds_is_unjudged():
+    """1スレッドの短時間に集中したコメント（1時間に50件、前後なし）も判定対象外。"""
+    r = run_detection(make_ts([50], [5]), CFG)
+    assert list(r.table["level"]) == [LEVEL_UNJUDGED]
+    assert r.summary()["n_judged_bins"] == 0
+
+
+def test_non_fire_data_with_judged_bins_is_normal():
+    """判定できる非炎上データ：最初の24時間は判定対象外、その後は判定して正常。"""
+    r = run_detection(make_ts([30] * 60, [9] * 60), CFG)
+    t = r.table
+    assert (t["level"].iloc[:24] == LEVEL_UNJUDGED).all()
+    assert (t["level"].iloc[24:] == LEVEL_NORMAL).all()
+    assert t["judged"].iloc[24:].all()
+    assert set(t["judged_methods"].iloc[30:]) == {"A+B+C"}
+    s = r.summary()
+    assert s["n_judged_bins"] == 36 and s["max_level"] == 0 and s["n_alert_bins"] == 0
+
+
+def test_existing_detection_unchanged_by_unjudged_level():
+    """判定対象外の追加で、警戒（同じ時間帯に2手法以上）・各手法の検知は変わらない。"""
+    ts = step_ts()
+    r = run_detection(ts, CFG)
+    both = (r.table[["a_alarm", "b_alarm", "c_alarm"]].sum(axis=1) >= 2)
+    assert ((r.table["level"] == LEVEL_ALERT) == both).all()
+    assert not ((r.table["level"] == LEVEL_UNJUDGED) & r.table[["a_alarm", "b_alarm", "c_alarm"]].any(axis=1)).any()

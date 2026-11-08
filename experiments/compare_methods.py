@@ -16,6 +16,10 @@
   # 感情分析の精度（人手の正解との比較）
   python -m experiments.compare_methods sentiment --gold data/research/sentiment_gold.csv
 
+  # 予備評価：基準時刻（会見開始など）の前後比較。正解ラベル（炎上開始）とは別に扱う
+  python -m experiments.compare_methods event --csv data/research/comments_TeRXuoLAX9o_….csv \
+      --event 2025-01-27T16:00:00+09:00 --before 24 --after 24
+
   # 論文用の表と図（results/report/ に出力。demo の結果なら --from results/demo_synthetic）
   python -m experiments.compare_methods report
 
@@ -214,6 +218,52 @@ def cmd_sentiment(args) -> None:
          Path(args.results_dir) / "sentiment_eval.csv")
 
 
+def cmd_event(args) -> None:
+    """予備評価：基準時刻の前後で、取得範囲・判定できた時間帯・検知を比べる。"""
+    from src.config import AnalysisConfig
+    from src.detection import run_detection
+    from src.event_study import event_window
+    from src.preprocessing import load_comments_csv
+    from src.time_series import aggregate_time_series
+
+    comments, _ = load_comments_csv(args.csv)
+    if args.video:
+        comments = comments[comments["video_id"] == args.video]
+    if comments.empty:
+        raise ValueError("コメントがありません。")
+    video = args.video or (comments["video_id"].iloc[0] if "video_id" in comments.columns else "video")
+    analyzer, info = make_analyzer(args.dictionary)
+    cfg = AnalysisConfig()
+    analyzed = analyzer.analyze(comments)
+    ts = aggregate_time_series(analyzed, freq=args.freq, ma_window=cfg.moving_average_window,
+                               min_comments=cfg.min_comments_reliable)
+    res = run_detection(ts, cfg, include_offline=False)
+    summary, by_detector, window = event_window(res.table, analyzed, pd.Timestamp(args.event),
+                                                args.before, args.after)
+    out = Path(args.results_dir) / "event"
+    stem = f"{video}_{pd.Timestamp(summary['event_time']):%Y%m%d_%H%M}"
+    print("【予備評価】基準時刻の前後比較です。炎上開始の正解ラベルを使う本評価とは別に扱います。")
+    print(f"辞書：{info['dictionary']}（{info['n_words']}語）　動画：{video}")
+    print(f"観測期間：{summary['window_start']} 〜 {summary['window_end']}（基準 {summary['event_time']}）")
+    print(f"取得範囲：{summary['first_comment']} 〜 {summary['last_comment']}　"
+          f"開始を覆う：{'はい' if summary['covers_start'] else 'いいえ'}　終了を覆う：{'はい' if summary['covers_end'] else 'いいえ'}")
+    print(f"期間内コメント：前 {summary['n_comments_pre']}件 / 後 {summary['n_comments_post']}件　"
+          f"判定できた時間帯：前 {summary['n_judged_bins_pre']}/{summary['n_bins_pre']} ・ 後 {summary['n_judged_bins_post']}/{summary['n_bins_post']}")
+    if not summary["covers_start"]:
+        print("注意：観測期間の開始より前のコメントがありません。動画の公開が観測開始より後か、"
+              "取得上限で古いコメントが欠けた可能性があります（取得時に表示される公開日時・取得率で確認）。")
+    with pd.option_context("display.width", 200, "display.max_columns", 20):
+        print(by_detector.to_string(index=False))
+    save(pd.DataFrame([summary]), out / f"{stem}_summary.csv")
+    save(by_detector, out / f"{stem}_detectors.csv")
+    w = window.copy()
+    w.index = [t.isoformat() for t in w.index]
+    w.index.name = "bin_start"
+    out.mkdir(parents=True, exist_ok=True)
+    w.to_csv(out / f"{stem}_bins.csv", encoding="utf-8-sig")
+    print(f"  → {out / (stem + '_bins.csv')}")
+
+
 def cmd_report(args) -> None:
     from src.report import build_report
 
@@ -264,6 +314,16 @@ def main(argv=None) -> int:
     s.add_argument("--gold", required=True)
     s.add_argument("--dictionary", default="auto")
     s.set_defaults(func=cmd_sentiment)
+
+    s = sub.add_parser("event", help="予備評価：基準時刻の前後比較（正解ラベルとは別）")
+    s.add_argument("--csv", required=True, help="コメントCSV")
+    s.add_argument("--video", default="", help="CSVに複数動画がある場合の動画ID")
+    s.add_argument("--event", required=True, help="基準時刻（例 2025-01-27T16:00:00+09:00）")
+    s.add_argument("--before", type=float, default=24.0)
+    s.add_argument("--after", type=float, default=24.0)
+    s.add_argument("--freq", default="1h")
+    s.add_argument("--dictionary", default="auto")
+    s.set_defaults(func=cmd_event)
 
     s = sub.add_parser("report", help="論文用の表と図を作る")
     s.add_argument("--from", dest="source", default="", help="結果のフォルダ（既定 results/）")

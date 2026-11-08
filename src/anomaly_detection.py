@@ -41,7 +41,10 @@ STATUS_LOW_BASELINE = "基準件数不足"
 LEVEL_NORMAL = "正常"
 LEVEL_CAUTION = "注意"
 LEVEL_ALERT = "警戒"
-LEVEL_COLORS = {LEVEL_NORMAL: "green", LEVEL_CAUTION: "orange", LEVEL_ALERT: "red"}
+LEVEL_UNJUDGED = "判定対象外"   # どの手法も判定条件を満たさず、検知もない時間帯（「正常」とは区別する）
+LEVEL_COLORS = {LEVEL_NORMAL: "green", LEVEL_CAUTION: "orange", LEVEL_ALERT: "red",
+                LEVEL_UNJUDGED: "gray"}
+LEVEL_RANK = {LEVEL_UNJUDGED: -1, LEVEL_NORMAL: 0, LEVEL_CAUTION: 1, LEVEL_ALERT: 2}
 
 METHOD_NAMES = {
     "A": "手法A 否定率の上昇",
@@ -151,21 +154,44 @@ def detect_zscore(ts: pd.DataFrame, cfg: AnalysisConfig | None = None,
 # 警戒レベルと検知の一覧
 # ---------------------------------------------------------------------------
 def alert_levels(alarms: pd.DataFrame, cfg: AnalysisConfig | None = None,
-                 freq: str | None = None) -> pd.DataFrame:
+                 freq: str | None = None, judged: pd.Series | None = None) -> pd.DataFrame:
     """
     alarms: 列 A, B, C（True/False）を持つ表。
     警戒は同じビンで複数手法が検知したときに出す。注意には直近 L ビンの検知を反映する。
+    judged: そのビンでいずれかの手法が実際に判定したか（True/False）。
+      検知がなく、どの手法も判定していないビンは「正常」ではなく「判定対象外」にする。
+      None のときはすべて判定したものとして扱う（従来どおり）。
     """
     cfg = cfg or AnalysisConfig()
     lookback = bins_for_hours(cfg.alert_lookback_hours, freq or _infer_freq(alarms))
     recent = alarms.astype(int).rolling(lookback, min_periods=1).max()
     k = recent.sum(axis=1).astype(int)
     simultaneous = alarms.astype(bool).sum(axis=1)
+    judged_arr = (np.ones(len(alarms), dtype=bool) if judged is None
+                  else judged.reindex(alarms.index).fillna(False).astype(bool).to_numpy())
     level = np.where(simultaneous >= cfg.red_min_methods, LEVEL_ALERT,
-                     np.where(k >= 1, LEVEL_CAUTION, LEVEL_NORMAL))
+                     np.where(k >= 1, LEVEL_CAUTION,
+                              np.where(judged_arr, LEVEL_NORMAL, LEVEL_UNJUDGED)))
     methods = recent.apply(lambda r: "+".join(c for c in alarms.columns if r[c]), axis=1)
     return pd.DataFrame({"n_methods": k, "level": level, "active_methods": methods},
                         index=alarms.index)
+
+
+def judged_bins(table: pd.DataFrame) -> pd.DataFrame:
+    """
+    ビンごとに、どの手法が実際に判定したか。
+      手法A・B：status が「判定」（履歴不足・件数不足・基準件数不足ではない）
+      手法C：PELT を計算した（c_evaluated）
+    戻り値の列：judged（いずれかが判定）、judged_methods（例 "A+B"）
+    """
+    a = table["a_status"] == STATUS_OK
+    b = table["b_status"] == STATUS_OK
+    c = table["c_evaluated"].astype(bool) if "c_evaluated" in table.columns else pd.Series(False, index=table.index)
+    names = pd.DataFrame({"A": a, "B": b, "C": c})
+    return pd.DataFrame({
+        "judged": a | b | c,
+        "judged_methods": names.apply(lambda r: "+".join(k for k in "ABC" if r[k]), axis=1),
+    }, index=table.index)
 
 
 def _fmt_pct(x: float) -> str:

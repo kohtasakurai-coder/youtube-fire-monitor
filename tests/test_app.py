@@ -44,8 +44,8 @@ def test_dashboard_detection_on_sample_data():
 
     comparison = at.dataframe[0].value.set_index("動画")
     fire = comparison.loc["SYN_FIRE01"]
-    assert fire["最初の警戒（赤）"] == "01/08 06:00"      # 架空の炎上開始と同じ時刻
-    assert fire["手法C 初検知"] == "01/08 08:00"          # 変化点 06:00 を 2時間後に検知
+    assert fire["最初の警戒（赤）"] == "2026/01/08 06:00"      # 架空の炎上開始と同じ時刻
+    assert fire["手法C 初検知"] == "2026/01/08 08:00"          # 変化点 06:00 を 2時間後に検知
     negnews = comparison.loc["SYN_NEGNEWS1"]
     assert negnews["最初の警戒（赤）"] == "—"             # 否定的な話題でも警戒（赤）にならない
     assert negnews["手法C 初検知"] == "—"
@@ -82,3 +82,32 @@ def test_comparison_and_data_pages():
     table = at.dataframe[0].value
     assert {"投稿日時（JST）", "コメント本文", "否定的コメント判定", "いいね数"} <= set(table.columns)
     assert len(table) == 2713
+
+
+def test_dashboard_shows_unjudged_for_short_burst():
+    """76秒に集中した50件（1スレッド）のようなデータでは「正常」ではなく判定対象外と表示する。"""
+    pytest.importorskip("ruptures")
+    pytest.importorskip("plotly")
+    import pandas as pd
+    from src.preprocessing import normalize_comments
+
+    times = pd.date_range("2020-05-17 15:07:00", periods=50, freq="1500ms", tz="Asia/Tokyo")
+    raw = pd.DataFrame({
+        "comment_id": [f"c{i}" for i in range(50)], "published_at": [t.isoformat() for t in times],
+        "text": ["おめでとう"] * 50, "like_count": 0, "parent_id": [""] + ["c0"] * 49,
+        "is_reply": [False] + [True] * 49, "video_id": "SHORTBURST", "data_source": "real"})
+    df, _ = normalize_comments(raw)
+    at = AppTest.from_file("../app.py", default_timeout=300)
+    at.session_state["comments"] = df
+    at.session_state["data_label"] = "短時間に集中したデータ"
+    at.session_state["load_warnings"] = []
+    at.run()
+    at.sidebar.radio[0].set_value("分析ダッシュボード").run()
+    click(at, "検知を実行")
+    assert not at.exception
+    comparison = at.dataframe[0].value.set_index("動画")
+    assert comparison.loc["SHORTBURST", "判定結果（期間中の最高レベル）"].startswith("⚪ 判定対象外")
+    assert comparison.loc["SHORTBURST", "判定できた時間帯"] == "0 / 1"
+    assert any("判定対象外" in w.value for w in at.warning)
+    labels = {m.label: m.value for m in at.metric}
+    assert labels["現在の警戒レベル"] == "⚪ 判定対象外"

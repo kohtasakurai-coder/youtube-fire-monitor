@@ -108,15 +108,21 @@ def test_saved_csv_is_readable_by_loader(monkeypatch, tmp_path):
     assert first == pd.Timestamp("2026-01-05 09:00", tz="Asia/Tokyo")
 
 
-def test_cli_reads_key_from_env(monkeypatch, tmp_path):
+FAKE_INFO = {"video_id": "Thc7JIJk6Co", "title": "テスト動画", "channel": "テスト",
+             "published_at_jst": None, "comment_count": 6}
+
+
+def test_cli_reads_key_from_env(monkeypatch, tmp_path, capsys):
     pages = [FakeResponse(200, {"items": [make_item(i) for i in range(3)]})]
     install_fake_api(monkeypatch, pages)
+    monkeypatch.setattr(youtube_api, "get_video_info", lambda vid, key: FAKE_INFO)
     monkeypatch.setenv("YOUTUBE_API_KEY", FAKE_KEY)
     out = tmp_path / "out.csv"
     assert youtube_api.main(["https://youtu.be/Thc7JIJk6Co", "--max", "10", "--out", str(out)]) == 0
     loaded, _ = load_comments_csv(out)
     assert len(loaded) == 3
     assert FAKE_KEY not in out.read_text(encoding="utf-8-sig")
+    assert "取得率（取得件数 / 総コメント数）：50.0%" in capsys.readouterr().out
 
 
 # =====================================================================
@@ -260,7 +266,28 @@ def test_replies_roundtrip_through_csv_loader(monkeypatch, tmp_path):
 def test_cli_replies_flag(monkeypatch, tmp_path, capsys):
     page = FakeResponse(200, {"items": [make_thread(0, total_replies=1, embedded=1)]})
     install_routed_api(monkeypatch, [page], {})
+    monkeypatch.setattr(youtube_api, "get_video_info", lambda vid, key: FAKE_INFO)
     monkeypatch.setenv("YOUTUBE_API_KEY", FAKE_KEY)
     out = tmp_path / "out.csv"
     assert youtube_api.main(["Thc7JIJk6Co", "--max", "10", "--replies", "--out", str(out)]) == 0
     assert "返信 1件" in capsys.readouterr().out
+
+
+def test_get_video_info(monkeypatch):
+    calls = []
+
+    def fake_get(url, params=None, timeout=None):
+        calls.append((url, dict(params)))
+        return FakeResponse(200, {"items": [{"snippet": {"title": "T", "channelTitle": "C",
+                                                         "publishedAt": "2025-01-23T12:51:00Z"},
+                                             "statistics": {"commentCount": "1234"}}]})
+
+    monkeypatch.setattr(youtube_api.requests, "get", fake_get)
+    info = youtube_api.get_video_info("TeRXuoLAX9o", FAKE_KEY)
+    assert calls[0][0] == youtube_api.VIDEOS_URL and calls[0][1]["part"] == "snippet,statistics"
+    assert str(info["published_at_jst"]) == "2025-01-23 21:51:00+09:00"
+    assert info["comment_count"] == 1234
+
+    monkeypatch.setattr(youtube_api.requests, "get", lambda *a, **k: FakeResponse(200, {"items": []}))
+    with pytest.raises(YouTubeAPIError):
+        youtube_api.get_video_info("XXXXXXXXXXX", FAKE_KEY)

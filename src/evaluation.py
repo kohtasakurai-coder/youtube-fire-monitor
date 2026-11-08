@@ -15,9 +15,14 @@
 ■ 1本の動画の判定（炎上開始時刻 s、評価窓 W＝初期値48時間）
   炎上動画：s ≤ 検知時刻 ≤ s+W の検知があれば「検知（TP）」、なければ「見逃し（FN）」
             s より前の検知は正解として数えず、誤警戒として数える（開始前の許容幅は 0）
-            検知遅れ = 最初の正しい検知時刻 − s（時間）
+            検知遅れ = 最初の正しい検知時刻 − s（時間）。検知時刻は検知した時間帯の開始時刻。
+            その時間帯の集計が確定するのは時間帯の終わりなので、確定時刻ベースの遅れ
+            （delay_hours_bin_end ＝ 遅れ＋1ビン）も動画ごとの表に出す
   非炎上動画：検知が1回でもあれば「誤警戒（FP）」、なければ「正しく沈黙（TN）」
   炎上開始時刻が不明な炎上動画：遅れと開始前の誤警戒は計算せず、件数を別に数える
+  判定対象外：評価する期間（炎上動画は開始〜開始+W、非炎上動画は全期間）に、どの手法も
+            判定できた時間帯が1つもない動画は「対象外」とし、TP/FN/FP/TN に入れず件数だけ数える
+            （判定していないのに「正しく沈黙」や「見逃し」と数えないため）
 
 ■ 集計（動画単位）
   再現率 Recall = TP / 炎上動画数
@@ -25,7 +30,7 @@
   F1 = 2PR / (P + R)
   誤警戒率① = 誤警戒の出た非炎上動画数 / 非炎上動画数
   誤警戒率② = 誤警戒イベント数 / 監視時間 × 100（100時間あたり）
-      監視時間 = 非炎上動画の全期間 ＋ 炎上動画の開始前の期間
+      監視時間 = 非炎上動画の判定できた時間帯 ＋ 炎上動画の開始前の判定できた時間帯
       誤警戒イベント = 誤警戒の検知を、間隔 merge_gap（初期値6時間）以内ならまとめた回数
   比率には Wilson の95%信頼区間、F1には動画単位のブートストラップ95%区間を付ける
 """
@@ -39,7 +44,7 @@ import numpy as np
 import pandas as pd
 from scipy.stats import binomtest
 
-from src.anomaly_detection import LEVEL_ALERT, LEVEL_NORMAL, _infer_freq
+from src.anomaly_detection import LEVEL_ALERT, LEVEL_CAUTION, _infer_freq
 
 DETECTOR_ORDER = ["A", "B", "C", "B∧A", "B∨A", "警戒", "注意以上"]
 DETECTOR_LABELS = {
@@ -72,7 +77,7 @@ def detector_flags(table: pd.DataFrame) -> pd.DataFrame:
         "A": a, "B": b, "C": c,
         "B∧A": a & b, "B∨A": a | b,
         "警戒": table["level"] == LEVEL_ALERT,
-        "注意以上": table["level"] != LEVEL_NORMAL,
+        "注意以上": table["level"].isin([LEVEL_CAUTION, LEVEL_ALERT]),   # 判定対象外は含めない
     }, index=table.index)[DETECTOR_ORDER]
 
 
@@ -178,13 +183,25 @@ def evaluate_video(table: pd.DataFrame, label: pd.Series, cfg: EvalConfig | None
     is_fire = int(label["is_fire"]) == 1
     start = label.get("fire_start")
     start = None if start is None or pd.isna(start) else start
+    judged = (table["judged"].astype(bool) if "judged" in table.columns
+              else pd.Series(True, index=table.index))
+    if is_fire and start is not None:
+        end_ = start + pd.Timedelta(hours=cfg.window_after_hours)
+        n_judged_eval = int(judged[(table.index >= start) & (table.index <= end_)].sum())
+    else:
+        n_judged_eval = int(judged.sum())
     rows = []
     for det in DETECTOR_ORDER:
         times = list(flags.index[flags[det].to_numpy()])
         row = {"video_id": label["video_id"], "incident_id": label["incident_id"],
                "split": label.get("split", ""), "is_fire": int(is_fire), "detector": det,
-               "n_alarm_bins": len(times)}
-        if is_fire and start is not None:
+               "n_alarm_bins": len(times), "n_judged_bins": int(judged.sum()),
+               "n_judged_bins_in_eval": n_judged_eval}
+        if n_judged_eval == 0:   # 判定対象外：指標には入れない
+            row.update({"outcome": "対象外", "first_detection": None, "delay_hours": np.nan,
+                        "false_alarm_events": np.nan, "monitored_hours": 0.0,
+                        "first_alarm_any": min(times) if times else None})
+        elif is_fire and start is not None:
             end = start + pd.Timedelta(hours=cfg.window_after_hours)
             hits = [t for t in times if start <= t <= end]
             pre = [t for t in times if t < start]
@@ -194,7 +211,7 @@ def evaluate_video(table: pd.DataFrame, label: pd.Series, cfg: EvalConfig | None
                 "first_detection": first,
                 "delay_hours": (first - start) / pd.Timedelta(hours=1) if first is not None else np.nan,
                 "false_alarm_events": len(merge_events(pre, cfg.merge_gap_hours)),
-                "monitored_hours": float((table.index < start).sum()) * bin_h,
+                "monitored_hours": float((judged & (table.index < start)).sum()) * bin_h,
                 "first_alarm_any": min(times) if times else None,
             })
         elif is_fire:   # 開始時刻不明：検知の有無だけ
@@ -205,10 +222,12 @@ def evaluate_video(table: pd.DataFrame, label: pd.Series, cfg: EvalConfig | None
             events = merge_events(times, cfg.merge_gap_hours)
             row.update({"outcome": "FP" if times else "TN", "first_detection": None,
                         "delay_hours": np.nan, "false_alarm_events": len(events),
-                        "monitored_hours": float(len(table)) * bin_h,
+                        "monitored_hours": float(judged.sum()) * bin_h,
                         "first_alarm_any": min(times) if times else None})
         rows.append(row)
     out = pd.DataFrame(rows)
+    # 参考：その時間帯の集計が確定する時刻（時間帯の終わり）で数えた遅れ（＝遅れ＋1ビン）
+    out["delay_hours_bin_end"] = out["delay_hours"] + bin_h
     if "start_unknown" not in out.columns:
         out["start_unknown"] = False
     out["start_unknown"] = out["start_unknown"].fillna(False).astype(bool)
@@ -259,13 +278,14 @@ def summarize(per_video: pd.DataFrame, n_boot: int = 1000, seed: int = 0) -> pd.
         d = per_video[per_video["detector"] == det]
         if d.empty:
             continue
-        fire, non = d[d["is_fire"] == 1], d[d["is_fire"] == 0]
+        evaluable = d[d["outcome"] != "対象外"]
+        fire, non = evaluable[evaluable["is_fire"] == 1], evaluable[evaluable["is_fire"] == 0]
         tp, fn = int((fire["outcome"] == "TP").sum()), int((fire["outcome"] == "FN").sum())
         fp, tn = int((non["outcome"] == "FP").sum()), int((non["outcome"] == "TN").sum())
         p, r, f = _prf(tp, fp, fn)
         r_lo, r_hi = wilson_interval(tp, tp + fn)
         fa_lo, fa_hi = wilson_interval(fp, fp + tn)
-        f_lo, f_hi = bootstrap_f1(d, n_boot, seed)
+        f_lo, f_hi = bootstrap_f1(evaluable, n_boot, seed)
         known = fire[~fire["start_unknown"]]
         delays = known["delay_hours"].dropna()
         hours = d["monitored_hours"].sum()
@@ -284,6 +304,7 @@ def summarize(per_video: pd.DataFrame, n_boot: int = 1000, seed: int = 0) -> pd.
             "遅れ_75%(h)": float(delays.quantile(0.75)) if len(delays) else np.nan,
             "遅れを測れた動画数": len(delays),
             "開始時刻不明の炎上動画数": int(fire["start_unknown"].sum()),
+            "判定対象外で除外した動画数": int((d["outcome"] == "対象外").sum()),
         })
     return pd.DataFrame(rows)
 
@@ -299,6 +320,7 @@ def mcnemar_tests(per_video: pd.DataFrame,
     同じ動画での正誤（炎上→TP、非炎上→TN を「正しい」とする）を2つの検知器で比べる
     McNemar 正確検定（二項検定）。実験4などの対応のある比較に使う。
     """
+    per_video = per_video[per_video["outcome"] != "対象外"]   # 判定していない動画は比べない
     correct = per_video.assign(ok=per_video["outcome"].isin(["TP", "TN"])).pivot(
         index="video_id", columns="detector", values="ok")
     rows = []

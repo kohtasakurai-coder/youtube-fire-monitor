@@ -110,7 +110,7 @@ def fig_zscore(table: pd.DataFrame, threshold: float) -> go.Figure:
     fig.add_hline(y=threshold, line=dict(color=RED, dash="dash"))
     fig.add_trace(go.Scatter(x=[None], y=[None], mode="lines", name=f"閾値 {threshold:g}",
                              line=dict(color=RED, dash="dash")))
-    level_y = {"注意": "orange", "警戒": RED}
+    level_y = {"判定対象外": "#cccccc", "注意": "orange", "警戒": RED}
     for level, color in level_y.items():
         hit = (table["level"] == level).to_numpy()
         if hit.any():

@@ -34,6 +34,7 @@ from src.preprocessing import extract_video_id, normalize_comments, save_comment
 
 API_URL = "https://www.googleapis.com/youtube/v3/commentThreads"
 COMMENTS_URL = "https://www.googleapis.com/youtube/v3/comments"
+VIDEOS_URL = "https://www.googleapis.com/youtube/v3/videos"
 API_KEY_ENV = "YOUTUBE_API_KEY"
 
 # APIが返すエラー理由（reason）→ 日本語の説明
@@ -211,6 +212,23 @@ def get_youtube_comments(video_id: str, api_key: str, max_results: int = 2000,
     return pd.DataFrame(rows, columns=OUTPUT_COLUMNS)
 
 
+def get_video_info(video_id: str, api_key: str, timeout: float = 30) -> dict:
+    """
+    動画の公開日時・タイトル・総コメント数を取得する（videos.list、1クォータ単位）。
+    総コメント数は YouTube が表示する値で、削除済みなどにより実際に取得できる件数と一致しないことがある。
+    """
+    data = _get_json(VIDEOS_URL, {"key": api_key, "part": "snippet,statistics", "id": video_id},
+                     api_key, timeout)
+    items = data.get("items", [])
+    if not items:
+        raise YouTubeAPIError(ERROR_MESSAGES["videoNotFound"], reason="videoNotFound")
+    sn, stats = items[0].get("snippet", {}), items[0].get("statistics", {})
+    published = pd.Timestamp(sn["publishedAt"]).tz_convert("Asia/Tokyo") if sn.get("publishedAt") else None
+    count = stats.get("commentCount")
+    return {"video_id": video_id, "title": sn.get("title", ""), "channel": sn.get("channelTitle", ""),
+            "published_at_jst": published, "comment_count": int(count) if count is not None else None}
+
+
 def fetch_comments(video_id: str, api_key: str, max_results: int = 2000,
                    include_replies: bool = False) -> tuple[pd.DataFrame, list[str]]:
     """
@@ -255,11 +273,14 @@ def main(argv: list[str] | None = None) -> int:
         return 1
 
     try:
+        info = get_video_info(video_id, api_key)
         df, warnings = fetch_comments(video_id, api_key, max_results=args.max,
                                       include_replies=args.replies)
     except YouTubeAPIError as e:
         print(f"エラー: {e}", file=sys.stderr)
         return 1
+    print(f"動画：{info['title']}（{info['channel']}）")
+    print(f"公開日時（JST）：{info['published_at_jst']}　総コメント数（YouTubeの表示）：{info['comment_count']}")
 
     out = Path(args.out) if args.out else default_output_path(video_id)
     save_comments_csv(df, out)
@@ -269,6 +290,8 @@ def main(argv: list[str] | None = None) -> int:
     print(f"{len(df)} comments fetched（トップレベル {len(df) - n_reply}件・返信 {n_reply}件） → {out}")
     if len(df):
         print(f"投稿日時（JST）: {df['published_at'].min()} 〜 {df['published_at'].max()}")
+        if info["comment_count"]:
+            print(f"取得率（取得件数 / 総コメント数）：{len(df) / info['comment_count']:.1%}")
     return 0
 
 

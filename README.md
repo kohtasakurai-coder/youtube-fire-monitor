@@ -134,7 +134,8 @@ $env:YOUTUBE_API_KEY = (Read-Host "APIキー" -AsSecureString | ConvertFrom-Secu
 | C 変化点（PELT） | 否定的コメント率 | 各時刻までのデータだけでPELT（rbf, penalty=3）を計算し、直近3時間以内に **+15ポイント以上の上昇** の変化点 |
 
 - すべてオンライン方式（時刻 t の判定には t までのデータだけを使う）。最初の24時間は「履歴不足」として判定しません
-- 警戒レベル：**同じ時間帯**に2手法以上が検知＝警戒、それ以外で直近3時間に検知あり＝注意、検知なし＝正常（別々の時間帯の検知を組み合わせて警戒にはしない）
+- 警戒レベル：**同じ時間帯**に2手法以上が検知＝警戒、それ以外で直近3時間に検知あり＝注意、判定して検知なし＝正常、**どの手法も判定条件を満たさず検知もない＝判定対象外**（別々の時間帯の検知を組み合わせて警戒にはしない）
+- 判定できた時間帯が1つもない動画（履歴不足・件数不足だけ）は「正常」ではなく「判定対象外」と表示し、比較表・CSV（`judged`, `judged_methods`, `level` 列）でも区別します。評価では TP/FN/FP/TN に入れず「判定対象外で除外した動画数」として数えます
 - 手法Cは「変化点の位置」と「検知できた時刻」を分けて表示します。全期間を使った事後分析の変化点は別表示で、評価には使いません
 - 画面では、検知時刻・手法・根拠（例：「否定率 61%（74件中45件）が直前24時間の否定率 12%（367件）より +49ポイント高い」）を一覧で確認できます
 - 設計書から変更・仮置きした値と理由は `docs/STEP1_設計書.md` の「STEP 4 実装時に決めたこと」に記載しています
@@ -164,6 +165,9 @@ $env:YOUTUBE_API_KEY = (Read-Host "APIキー" -AsSecureString | ConvertFrom-Secu
 
 # 感情分析の精度（人手の正解との比較）
 .venv\Scripts\python.exe -m experiments.compare_methods sentiment --gold data/research/sentiment_gold.csv
+
+# 予備評価：基準時刻（会見開始など）の前後比較。正解ラベル（炎上開始）とは別に扱う
+.venv\Scripts\python.exe -m experiments.compare_methods event --csv data/research/comments_（動画ID）_（日時）.csv --event 2025-01-27T16:00:00+09:00 --before 24 --after 24
 
 # 論文用の表と図（results\report\ に出力。架空データの結果なら --from results/demo_synthetic）
 .venv\Scripts\python.exe -m experiments.compare_methods report

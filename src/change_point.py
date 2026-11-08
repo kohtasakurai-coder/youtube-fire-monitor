@@ -110,9 +110,9 @@ def detect_change_points_online(ts: pd.DataFrame, cfg: AnalysisConfig | None = N
                 "delay_bins": t - tau,
                 "pre_mean": pre_mean,
                 "post_mean": post_mean,
-                "reason": (f"否定率の水準が {ts.index[tau]:%m/%d %H:%M} から "
+                "reason": (f"否定率の水準が {ts.index[tau]:%Y/%m/%d %H:%M} から "
                            f"{pre_mean:.0%} → {post_mean:.0%}（{(post_mean - pre_mean) * 100:+.0f}ポイント）"
-                           f"に変化したと、{ts.index[t]:%m/%d %H:%M} までのデータで推定"
+                           f"に変化したと、{ts.index[t]:%Y/%m/%d %H:%M} までのデータで推定"
                            f"（PELT model={cfg.pelt_model}, penalty={cfg.pelt_penalty:g}）"),
             })
 

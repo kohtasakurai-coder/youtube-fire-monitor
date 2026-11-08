@@ -20,7 +20,7 @@ import streamlit as st
 
 from src import visualization as viz
 from src.access import api_fetch_allowed, is_public_mode, read_setting
-from src.anomaly_detection import LEVEL_ALERT, LEVEL_CAUTION, LEVEL_NORMAL
+from src.anomaly_detection import LEVEL_ALERT, LEVEL_CAUTION, LEVEL_NORMAL, LEVEL_UNJUDGED
 from src.config import DATA_SOURCE_SYNTHETIC, AnalysisConfig
 from src.detection import run_detection
 from src.evaluation import (
@@ -55,7 +55,16 @@ APP_TITLE = "YouTube炎上早期検知システム（研究用プロトタイプ
 SAMPLE_CSV = Path(__file__).parent / "data" / "sample" / "sample_comments.csv"
 SAMPLE_LABELS = Path(__file__).parent / "data" / "sample" / "sample_labels.csv"
 RESEARCH_LABELS = Path(__file__).parent / "data" / "research" / "labels.csv"
-LEVEL_BADGE = {LEVEL_NORMAL: "🟢 正常", LEVEL_CAUTION: "🟡 注意", LEVEL_ALERT: "🔴 警戒"}
+LEVEL_BADGE = {LEVEL_NORMAL: "🟢 正常", LEVEL_CAUTION: "🟡 注意", LEVEL_ALERT: "🔴 警戒",
+               LEVEL_UNJUDGED: "⚪ 判定対象外"}
+RANK_TO_LEVEL = {-1: LEVEL_UNJUDGED, 0: LEVEL_NORMAL, 1: LEVEL_CAUTION, 2: LEVEL_ALERT}
+
+
+def overall_status(summary: dict) -> str:
+    """動画全体の判定結果。判定できた時間帯が0なら「正常」ではなく判定対象外と表示する。"""
+    if summary["n_judged_bins"] == 0 and summary["max_level"] < 1:
+        return "⚪ 判定対象外（判定できた時間帯なし）"
+    return LEVEL_BADGE[RANK_TO_LEVEL[int(summary["max_level"])]]
 
 st.set_page_config(page_title="炎上早期検知", page_icon="📈", layout="wide")
 
@@ -363,7 +372,7 @@ def load_reference_times(df: pd.DataFrame) -> dict:
 
 
 def _fmt_time(t) -> str:
-    return "—" if t is None or pd.isna(t) else pd.Timestamp(t).strftime("%m/%d %H:%M")
+    return "—" if t is None or pd.isna(t) else pd.Timestamp(t).strftime("%Y/%m/%d %H:%M")
 
 
 def page_dashboard() -> None:
@@ -425,7 +434,9 @@ def page_dashboard() -> None:
             "動画": v,
             "正解（架空）": ("炎上（" + _fmt_time(ref) + "開始）") if ref is not None
                            else ("非炎上" if v in refs else "—"),
-            "最高警戒レベル": LEVEL_BADGE[[LEVEL_NORMAL, LEVEL_CAUTION, LEVEL_ALERT][int(s["max_level"])]],
+            "判定結果（期間中の最高レベル）": overall_status(s),
+            "判定できた時間帯": f"{s['n_judged_bins']} / {s['n_bins']}",
+            "警戒の時間帯数": s["n_alert_bins"],
             "最初の警戒（赤）": _fmt_time(r["result"].table.index[r["result"].table["level"] == LEVEL_ALERT][0]
                                        if (r["result"].table["level"] == LEVEL_ALERT).any() else None),
             "手法A 初検知": _fmt_time(s["first_A"]), "A 回数": s["n_alarm_A"],
@@ -434,8 +445,12 @@ def page_dashboard() -> None:
             "最初の検知（いずれか）": _fmt_time(first_any),
         })
     st.dataframe(pd.DataFrame(rows), hide_index=True)
-    st.caption("回数は検知した時間帯の数（連続した検知をまとめる処理は評価実験〔STEP 6〕で行います）。"
+    st.caption("「判定できた時間帯」は、手法A・B・Cのいずれかが判定条件（24時間分の履歴、10件以上のコメント）を"
+               "満たした時間帯の数です。判定できた時間帯が0の動画は「正常」ではなく判定対象外と表示します。"
+               "回数は検知した時間帯の数（連続した検知をまとめる処理は評価実験〔STEP 6〕で行います）。"
                "架空データの正解は生成プログラムで決めた値で、研究の評価には使いません。")
+    st.download_button("動画ごとの比較をCSVで保存", pd.DataFrame(rows).to_csv(index=False).encode("utf-8-sig"),
+                       file_name="dashboard_comparison.csv", mime="text/csv")
 
     # --- 1本の動画の詳細 ---
     st.divider()
@@ -449,14 +464,24 @@ def page_dashboard() -> None:
         return
 
     last = table.iloc[-1]
+    summary = res.summary()
+    judged_idx = table.index[table["judged"]]
+    if summary["n_judged_bins"] == 0:
+        st.warning("この動画には判定条件を満たす時間帯がありません（すべて履歴不足・件数不足）。"
+                   "検知がないのは「正常」と判定したためではなく、判定対象外だからです。")
     m1, m2, m3, m4 = st.columns(4)
     m1.metric("総コメント数", f"{len(analyzed):,}")
     neg_all = (analyzed["is_negative"] == 1).mean()
     m2.metric("否定的コメント率", f"{neg_all:.1%}")
     m3.metric("最新の異常スコア（Z）", "—" if pd.isna(last["b_z"]) else f"{last['b_z']:.1f}",
               help=f"最後の時間帯（{_fmt_time(table.index[-1])}）の手法BのZスコア。判定状態：{last['b_status']}")
+    last_judged = (f"最後に判定できた時間帯：{_fmt_time(judged_idx[-1])}（{table.loc[judged_idx[-1], 'level']}）"
+                   if len(judged_idx) else "判定できた時間帯はありません")
     m4.metric("現在の警戒レベル", LEVEL_BADGE[last["level"]],
-              help="同じ時間帯に設定数以上の手法が検知すると警戒。直近3時間に検知があれば注意。")
+              help="最後の時間帯のレベル。同じ時間帯に設定数以上の手法が検知すると警戒、直近3時間に検知があれば注意、"
+                   "検知がなく判定もできなかった時間帯は判定対象外。" + last_judged)
+    st.caption(f"期間中の判定結果：{overall_status(summary)}　／　判定できた時間帯 "
+               f"{summary['n_judged_bins']} / {summary['n_bins']}　／　{last_judged}")
 
     a_counts = table["a_status"].value_counts()
     st.caption(
@@ -551,11 +576,18 @@ def page_comparison() -> None:
     st.subheader("手法ごとの検知結果")
     rows = []
     for v, r in results.items():
-        flags = detector_flags(r["result"].table)
+        tbl = r["result"].table
+        flags = detector_flags(tbl)
+        judged_count = {"A": int((tbl["a_status"] == "判定").sum()), "B": int((tbl["b_status"] == "判定").sum()),
+                        "C": int(tbl["c_evaluated"].sum()), "警戒": int(tbl["judged"].sum())}
         for d in ["A", "B", "C", "警戒"]:
             times = list(flags.index[flags[d].to_numpy()])
             rows.append({
-                "動画": v, "手法": DETECTOR_LABELS[d], "検知した時間帯の数": len(times),
+                "動画": v, "手法": DETECTOR_LABELS[d],
+                "判定できた時間帯": f"{judged_count[d]} / {len(tbl)}",
+                "結果": ("判定対象外" if judged_count[d] == 0 and not times
+                         else ("検知あり" if times else "判定したが検知なし")),
+                "検知した時間帯の数": len(times),
                 "検知イベント数（6時間以内はまとめる）": len(merge_events(times, 6)),
                 "最初の検知": _fmt_time(times[0]) if times else "—",
                 "検知時刻（最大5件）": "、".join(_fmt_time(t) for t in times[:5]) + ("…" if len(times) > 5 else ""),
@@ -595,10 +627,13 @@ def page_comparison() -> None:
 
     per_video = pd.concat([evaluate_video(results[row["video_id"]]["result"].table, row)
                            for _, row in shown.iterrows()], ignore_index=True)
+    n_excluded = per_video.loc[per_video["outcome"] == "対象外", "video_id"].nunique()
+    if n_excluded:
+        st.warning(f"判定できた時間帯がない動画 {n_excluded} 本は「判定対象外」として指標から除外しました。")
     summary = summarize(per_video, n_boot=200)
     cols = ["detector", "説明", "検知(TP)", "見逃し(FN)", "誤警戒動画(FP)", "沈黙(TN)", "Precision",
             "Recall", "Recall_95CI", "F1", "誤警戒率_動画", "誤警戒_100時間あたり",
-            "遅れ_中央値(h)", "遅れを測れた動画数"]
+            "遅れ_中央値(h)", "遅れを測れた動画数", "判定対象外で除外した動画数"]
     st.dataframe(summary[cols].round(3), hide_index=True)
     st.caption("炎上動画は「炎上開始 ≤ 検知時刻 ≤ 開始＋48時間」の検知だけを正解とし、開始前の警報は誤警戒として"
                "数えます。遅れは推定された変化点の位置ではなく、実際に検知できた時刻で計算しています。"

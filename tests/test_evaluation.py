@@ -264,3 +264,23 @@ def test_tune_uses_only_dev_and_test_runs_once(synthetic, tmp_path):
     log = pd.read_csv(proto.log_file)
     assert list(log["action"]) == ["freeze-labels", "tune（設定を固定）", "test"]
     assert json.loads(proto.test_done_file.read_text(encoding="utf-8"))["runs"][0]["config_id"] == cid
+
+
+def test_unjudged_video_is_excluded_not_tn():
+    """判定できた時間帯がない非炎上動画は TN ではなく「対象外」。注意以上にも判定対象外を含めない。"""
+    t = table_with()
+    t["judged"] = False
+    t["level"] = "判定対象外"
+    ev = evaluate_video(t, label("N0", fire=False, start_bin=None, incident="I9"))
+    assert set(ev["outcome"]) == {"対象外"}
+    assert row(ev, "注意以上")["n_alarm_bins"] == 0
+    judged_tn = evaluate_video(table_with(), label("N1", fire=False, start_bin=None, incident="I8"))
+    s = summarize(pd.concat([ev, judged_tn]), n_boot=10).set_index("detector").loc["A"]
+    assert s["沈黙(TN)"] == 1 and s["非炎上動画数"] == 1 and s["判定対象外で除外した動画数"] == 1
+
+
+def test_monitored_hours_count_only_judged_bins():
+    t = table_with(alarms_b=[60])
+    t["judged"] = [i >= 24 for i in range(100)]
+    r = row(evaluate_video(t, label(fire=False, start_bin=None)), "B")
+    assert r["monitored_hours"] == 76.0 and r["outcome"] == "FP"
