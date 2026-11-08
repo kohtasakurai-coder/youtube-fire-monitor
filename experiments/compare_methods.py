@@ -20,6 +20,10 @@
   python -m experiments.compare_methods event --csv data/research/comments_TeRXuoLAX9o_….csv \
       --event 2025-01-27T16:00:00+09:00 --before 24 --after 24
 
+  # 感情分析の人手評価用の候補（辞書の予測を含まない）。済んだラベルは --exclude で除く
+  python -m experiments.compare_methods gold-sample --csv data/research/a.csv data/research/b.csv \
+      --n 180 --per-video-cap 90 --exclude data/research/sentiment_gold_done20.csv
+
   # 論文用の表と図（results/report/ に出力。demo の結果なら --from results/demo_synthetic）
   python -m experiments.compare_methods report
 
@@ -211,6 +215,7 @@ def cmd_sentiment(args) -> None:
     analyzer, info = make_analyzer(args.dictionary)
     pred = analyzer.analyze(gold)
     m = evaluate_negative_detection(pred["is_negative"], gold["gold_negative"])
+    m["n_hold"] = int(pd.to_numeric(gold["gold_negative"], errors="coerce").isna().sum())   # 保留（空欄）
     print(f"辞書：{info['dictionary']}（{info['n_words']}語）")
     for k, v in m.items():
         print(f"  {k}: {v:.3f}" if isinstance(v, float) else f"  {k}: {v}")
@@ -262,6 +267,27 @@ def cmd_event(args) -> None:
     out.mkdir(parents=True, exist_ok=True)
     w.to_csv(out / f"{stem}_bins.csv", encoding="utf-8-sig")
     print(f"  → {out / (stem + '_bins.csv')}")
+
+
+def cmd_gold_sample(args) -> None:
+    from src.gold_sampling import sample_gold_candidates
+    from src.preprocessing import load_comments_csv
+
+    frames = [load_comments_csv(p)[0] for p in args.csv]
+    comments = pd.concat(frames, ignore_index=True)
+    exclude = set()
+    for p in args.exclude:
+        exclude |= set(pd.read_csv(p, encoding="utf-8-sig", dtype=str)["comment_id"].dropna())
+    out, breakdown = sample_gold_candidates(comments, n=args.n, per_video_cap=args.per_video_cap,
+                                            per_thread_cap=args.per_thread_cap, exclude_ids=exclude,
+                                            seed=args.seed)
+    path = Path(args.out)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    out.to_csv(path, index=False, encoding="utf-8-sig")
+    print(f"候補 {len(out)} 件 / 目標 {args.n} 件（除外した既存ラベル {len(exclude)} 件）→ {path}")
+    print(breakdown.to_string(index=False))
+    if len(out) < args.n:
+        print(f"不足 {args.n - len(out)} 件：動画を追加して同じ seed で再実行すると、既に選んだ候補は変わらずに追加されます。")
 
 
 def cmd_report(args) -> None:
@@ -324,6 +350,16 @@ def main(argv=None) -> int:
     s.add_argument("--freq", default="1h")
     s.add_argument("--dictionary", default="auto")
     s.set_defaults(func=cmd_event)
+
+    s = sub.add_parser("gold-sample", help="感情分析の人手評価用の候補を作る（予測を含まない）")
+    s.add_argument("--csv", nargs="+", required=True, help="コメントCSV（複数可）")
+    s.add_argument("--n", type=int, default=180)
+    s.add_argument("--per-video-cap", type=int, default=90, help="1動画から選ぶ最大件数")
+    s.add_argument("--per-thread-cap", type=int, default=3, help="1スレッド（親＋返信）から選ぶ最大件数")
+    s.add_argument("--exclude", nargs="*", default=[], help="済んだラベルのCSV（comment_id 列）")
+    s.add_argument("--seed", default="gold-2026")
+    s.add_argument("--out", default=str(PROJECT_ROOT / "data" / "research" / "sentiment_gold_candidates.csv"))
+    s.set_defaults(func=cmd_gold_sample)
 
     s = sub.add_parser("report", help="論文用の表と図を作る")
     s.add_argument("--from", dest="source", default="", help="結果のフォルダ（既定 results/）")

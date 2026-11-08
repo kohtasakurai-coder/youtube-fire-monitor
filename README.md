@@ -195,7 +195,13 @@ $env:YOUTUBE_API_KEY = (Read-Host "APIキー" -AsSecureString | ConvertFrom-Secu
 
 ### 用意する感情分析の正解（`data/research/sentiment_gold.csv`、Git管理外）
 
-雛形：`docs/templates/sentiment_gold_template.csv`。列は `comment_id, text, gold_negative`（1/0）。
+雛形：`docs/templates/sentiment_gold_template.csv`。列は `comment_id, text, gold_negative`（1/0。保留は空欄）。
+
+判定する候補は次のコマンドで作ります。出力には本文と出所（動画ID・返信かどうか）だけが入り、辞書の予測は入りません。1動画・1スレッドあたりの上限があり、済んだラベルは `--exclude` で除けます。動画を追加して同じ seed で再実行しても、既に選んだ候補は変わりません。
+
+```powershell
+.venv\Scripts\python.exe -m experiments.compare_methods gold-sample --csv data\research\（CSV1） data\research\（CSV2） --n 180 --per-video-cap 90 --exclude data\research\（済んだ20件のCSV）
+```
 
 ## クラウド公開（STEP 7）
 
