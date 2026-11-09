@@ -4,7 +4,7 @@ YouTube炎上早期検知Webアプリ（Streamlit）
 起動方法（プロジェクトのルートで）:
     streamlit run app.py
 
-現在の実装状況：STEP 4
+現在の実装状況：STEP 7（感情辞書はローカルでNRC日本語辞書を初期選択、公開デモは簡易辞書のみ）
   - 実装済み : ホーム画面（URLからのコメント取得、CSV読み込み、架空データの読み込み、データの概要表示）、
                感情分析（Janome＋感情辞書）と時間ごとの集計、
                分析ダッシュボード（手法A・B・Cの検知、検知時刻と根拠、動画ごとの比較）
@@ -41,8 +41,12 @@ from src.preprocessing import (
     load_comments_csv,
 )
 from src.sentiment_analysis import (
-    SIMPLE_DICTIONARY_PATH,
+    NRC_DEFAULT_PATH,
+    PROJECT_ROOT,
     SentimentAnalyzer,
+    add_dictionary_column,
+    dictionary_choices,
+    emotion_summary,
     find_private_dictionaries,
     load_nrc_dictionary,
     load_simple_dictionary,
@@ -244,23 +248,61 @@ def show_loaded_summary() -> pd.DataFrame | None:
     return df
 
 
-def dictionary_options() -> dict[str, tuple[str, str]]:
-    """使える辞書：公開デモ用の簡易辞書 ＋ 手元の非公開フォルダにある辞書（NRCなど）。"""
-    options = {"研究用簡易辞書（自作・公開デモ用）": (str(SIMPLE_DICTIONARY_PATH), "simple")}
+DICT_STATE = "dictionary_choice"      # 感情分析とダッシュボードで共有する辞書の選択
+
+
+def dictionary_options() -> tuple[dict[str, tuple[str, str]], str]:
+    """
+    使える辞書と初期選択。ローカル研究版は非公開フォルダのNRC辞書があればそれを初期選択にし、
+    簡易辞書にも切り替えられる。公開デモ版（PUBLIC_MODE）は簡易辞書だけ。
+    """
+    choices, default = dictionary_choices(find_private_dictionaries(), is_public_mode(st.secrets))
+    return {c.label: (c.path, c.kind) for c in choices}, choices[default].label
+
+
+def select_dictionary(container, key: str) -> tuple[str, str, str]:
+    """
+    辞書の選択欄。感情分析とダッシュボードのどちらで変えても、もう一方にも同じ辞書が入る。
+    戻り値: (表示名, パス, 種類)
+    """
+    options, default = dictionary_options()
+    if st.session_state.get(DICT_STATE) not in options:
+        st.session_state[DICT_STATE] = default
+    st.session_state[key] = st.session_state[DICT_STATE]
+
+    def _sync() -> None:
+        st.session_state[DICT_STATE] = st.session_state[key]
+
+    label = container.selectbox("感情辞書", list(options.keys()), key=key, on_change=_sync,
+                                help="感情分析と炎上検知ダッシュボードで同じ辞書を使います（どちらで変えても両方に反映）")
+    path, kind = options[label]
+    return label, path, kind
+
+
+def show_dictionary_notice() -> None:
+    """辞書についての案内（公開デモ版の説明、NRC辞書がないときの設置場所）。"""
     if is_public_mode(st.secrets):
-        return options          # 公開版では非公開の辞書（NRCなど）を使わない
-    for p in find_private_dictionaries():
-        options[f"非公開フォルダ：{p.name}（NRC形式）"] = (str(p), "nrc")
-    return options
+        st.caption("公開デモ版のため、感情辞書は自作の簡易辞書だけを使います（NRC辞書はクラウドに置いていません）。")
+        return
+    if not any(kind == "nrc" for _, kind in dictionary_options()[0].values()):
+        rel = NRC_DEFAULT_PATH.relative_to(PROJECT_ROOT).as_posix()
+        st.info(f"NRC日本語辞書が見つからないため、簡易辞書で分析します。NRC辞書を使うには、"
+                f"`{rel}` にファイルを置いてからアプリを再読み込みしてください"
+                f"（このフォルダは .gitignore でGitHubに上がりません）。\n\n設置場所：`{NRC_DEFAULT_PATH}`")
+
+
+def unjudged_note() -> str:
+    return ("「判定不能」はコメント単位（辞書に一致する語がなく、否定とも非否定とも判定できない）、"
+            "「判定対象外」は時間帯単位（コメント数や直前24時間の履歴が足りず、検知の判定をしていない）で、別のものです。")
 
 
 def show_sentiment_section(df: pd.DataFrame) -> None:
     """感情分析と時間ごとの集計（STEP 3）。"""
     st.subheader("感情分析と時系列集計")
 
-    options = dictionary_options()
+    show_dictionary_notice()
     c1, c2, c3, c4 = st.columns(4)
-    dict_label = c1.selectbox("感情辞書", list(options.keys()))
+    dict_label, path, kind = select_dictionary(c1, "sent_dict")
     freq = c2.selectbox("集計時間幅", ["1h", "30min", "3h"], index=0)
     neg_threshold = c3.slider("否定判定の閾値 θ", 0.1, 1.0, 0.5, 0.05,
                               help="否定的な感情語の割合がθ以上なら否定的コメントと判定")
@@ -268,7 +310,6 @@ def show_sentiment_section(df: pd.DataFrame) -> None:
     ma_window = st.number_input("移動平均の期間（ビン数）", 1, 48, 6)
 
     if st.button("感情分析を実行", type="primary"):
-        path, kind = options[dict_label]
         try:
             analyzer = get_analyzer(path, kind, float(neg_threshold))
         except ImportError as e:
@@ -283,6 +324,7 @@ def show_sentiment_section(df: pd.DataFrame) -> None:
                                        min_comments=int(min_comments))
         st.session_state["analysis"] = {
             "analyzed": analyzed, "ts": ts, "dict": analyzer.dictionary.stats(),
+            "dict_label": dict_label, "min_comments": int(min_comments),
             "video": df["video_id"].iloc[0] if "video_id" in df.columns else "",
         }
 
@@ -293,14 +335,33 @@ def show_sentiment_section(df: pd.DataFrame) -> None:
         return
 
     analyzed, ts, stats = result["analyzed"], result["ts"], result["dict"]
+    if result.get("dict_label") != dict_label:
+        st.warning(f"表示中の結果は「{result.get('dict_label')}」で分析したものです。"
+                   "選択中の辞書で見るには、もう一度「感情分析を実行」を押してください。")
     summary = summarize_sentiment(analyzed)
-    st.caption(f"辞書：{stats['dictionary']}（{stats['n_words']}語）")
+    st.markdown(f"**使用した辞書**：{stats['dictionary']}（5感情の見出し語 {stats['n_words']:,}語）")
 
-    m1, m2, m3, m4 = st.columns(4)
-    m1.metric("否定的コメント率（全コメント中）", f"{summary['neg_rate_all']:.1%}")
-    m2.metric("判定できた割合（カバー率）", f"{summary['coverage']:.1%}")
-    m3.metric("判定不能のコメント", f"{summary['n_unknown']:,}件")
-    m4.metric("信頼性の低い時間帯", f"{int(ts['low_reliability'].sum())} / {len(ts)}")
+    m1, m2, m3, m4, m5 = st.columns(5)
+    m1.metric("否定判定率（分母＝判定できたコメント）",
+              "—" if pd.isna(summary["neg_rate_judged"]) else f"{summary['neg_rate_judged']:.1%}")
+    m2.metric("否定的コメント率（全コメント中）", f"{summary['neg_rate_all']:.1%}")
+    m3.metric("判定できた割合（カバー率）", f"{summary['coverage']:.1%}")
+    m4.metric("判定不能のコメント", f"{summary['n_unknown']:,}件")
+    m5.metric("コメント数不足の時間帯", f"{int(ts['low_reliability'].sum())} / {len(ts)}",
+              help=f"コメントが{result.get('min_comments', 10)}件未満の時間帯。炎上検知では判定対象外になります")
+    st.caption(
+        f"否定判定率 ＝ 否定的と判定したコメント {summary['n_negative']:,}件 ÷ 判定できたコメント "
+        f"{summary['n_judged']:,}件。全コメント {summary['n_comments']:,}件を分母にした値が「全コメント中」"
+        f"（時系列グラフの否定的コメント率と炎上検知はこちらの定義）。判定不能 {summary['n_unknown']:,}件は"
+        "否定にも非否定にも数えていません。" + unjudged_note()
+        + "履歴不足（データの最初の24時間）を含めた判定対象外の時間帯は、分析ダッシュボードに表示します。")
+
+    st.markdown("**感情別の集計**（分母＝判定できたコメント）")
+    emo = emotion_summary(analyzed)
+    st.dataframe(emo.drop(columns=["emotion"]).round(3), hide_index=True)
+    status_counts = analyzed["sentiment_status"].value_counts()
+    st.caption("否定的コメント判定の内訳：" + "・".join(
+        f"{k} {int(status_counts.get(k, 0)):,}件" for k in ["否定的", "非否定的", "判定不能"]))
     if summary["coverage"] < 0.5:
         st.warning("辞書に一致しないコメントが半数以上あります。判定不能のコメントは"
                    "否定的とも肯定的とも扱っていません。辞書の網羅性の限界に注意してください。")
@@ -320,11 +381,15 @@ def show_sentiment_section(df: pd.DataFrame) -> None:
     with st.expander("時系列の集計表"):
         st.dataframe(ts)
 
-    d1, d2 = st.columns(2)
+    d1, d2, d3 = st.columns(3)
     d1.download_button("判定結果付きコメントをCSVで保存", comments_to_csv_bytes(analyzed),
                        file_name="comments_with_sentiment.csv", mime="text/csv")
-    d2.download_button("時系列データをCSVで保存", time_series_to_csv_bytes(ts),
+    d2.download_button("時系列データをCSVで保存",
+                       time_series_to_csv_bytes(add_dictionary_column(ts, stats["dictionary"])),
                        file_name="time_series.csv", mime="text/csv")
+    d3.download_button("感情別の集計をCSVで保存",
+                       add_dictionary_column(emo, stats["dictionary"]).to_csv(index=False).encode("utf-8-sig"),
+                       file_name="emotion_summary.csv", mime="text/csv")
     st.caption("限界：皮肉・文脈・比喩は判定できません。「最悪ではない」のような直後の否定だけを除外しています。")
 
 
@@ -384,14 +449,13 @@ def page_dashboard() -> None:
         return
     show_data_source_banner(df_all)
 
-    options = dictionary_options()
+    show_dictionary_notice()
     c1, c2 = st.columns(2)
-    dict_label = c1.selectbox("感情辞書", list(options.keys()), key="dash_dict")
+    dict_label, path, kind = select_dictionary(c1, "dash_dict")
     freq = c2.selectbox("集計時間幅", ["1h", "30min", "3h"], key="dash_freq")
     cfg = detection_config_ui()
 
     if st.button("検知を実行", type="primary"):
-        path, kind = options[dict_label]
         try:
             analyzer = get_analyzer(path, kind, 0.5)
         except (ImportError, ValueError, OSError) as e:
@@ -412,7 +476,7 @@ def page_dashboard() -> None:
                     st.error(str(e))
                     return
         st.session_state["detection"] = {"videos": results, "cfg": cfg,
-                                         "dict": analyzer.dictionary.stats()}
+                                         "dict": analyzer.dictionary.stats(), "dict_label": dict_label}
 
     det = st.session_state.get("detection")
     if not det:
@@ -420,7 +484,11 @@ def page_dashboard() -> None:
         return
     cfg, results = det["cfg"], det["videos"]
     refs = load_reference_times(df_all)
-    st.caption(f"辞書：{det['dict']['dictionary']}（{det['dict']['n_words']}語）")
+    dict_name = det["dict"]["dictionary"]
+    st.markdown(f"**使用した辞書**：{dict_name}（5感情の見出し語 {det['dict']['n_words']:,}語）")
+    if det.get("dict_label") != dict_label:
+        st.warning(f"表示中の検知結果は「{det.get('dict_label')}」で分析したものです。"
+                   "選択中の辞書で見るには、もう一度「検知を実行」を押してください。")
 
     # --- 動画ごとの比較 ---
     st.subheader("動画ごとの比較")
@@ -430,6 +498,8 @@ def page_dashboard() -> None:
         ref = refs.get(v)
         first_any = min([t for t in (s["first_A"], s["first_B"], s["first_C"]) if t is not None],
                         default=None)
+        sent = summarize_sentiment(r["analyzed"])
+        lv = r["result"].table["level"].value_counts()
         rows.append({
             "動画": v,
             "正解（架空）": ("炎上（" + _fmt_time(ref) + "開始）") if ref is not None
@@ -443,12 +513,19 @@ def page_dashboard() -> None:
             "手法B 初検知": _fmt_time(s["first_B"]), "B 回数": s["n_alarm_B"],
             "手法C 初検知": _fmt_time(s["first_C"]), "C 回数": s["n_alarm_C"],
             "最初の検知（いずれか）": _fmt_time(first_any),
+            "警戒の時間帯": int(lv.get(LEVEL_ALERT, 0)), "注意の時間帯": int(lv.get(LEVEL_CAUTION, 0)),
+            "正常の時間帯": int(lv.get(LEVEL_NORMAL, 0)), "判定対象外の時間帯": int(lv.get(LEVEL_UNJUDGED, 0)),
+            "コメント数": sent["n_comments"], "判定不能コメント": sent["n_unknown"],
+            "カバー率": round(sent["coverage"], 3),
+            "否定判定率（分母＝判定できたコメント）": round(sent["neg_rate_judged"], 3),
+            "辞書": dict_name,
         })
     st.dataframe(pd.DataFrame(rows), hide_index=True)
     st.caption("「判定できた時間帯」は、手法A・B・Cのいずれかが判定条件（24時間分の履歴、10件以上のコメント）を"
                "満たした時間帯の数です。判定できた時間帯が0の動画は「正常」ではなく判定対象外と表示します。"
                "回数は検知した時間帯の数（連続した検知をまとめる処理は評価実験〔STEP 6〕で行います）。"
-               "架空データの正解は生成プログラムで決めた値で、研究の評価には使いません。")
+               "判定対象外の時間帯は「正常」（判定して検知なし）とは分けて数えています。"
+               "架空データの正解は生成プログラムで決めた値で、研究の評価には使いません。" + unjudged_note())
     st.download_button("動画ごとの比較をCSVで保存", pd.DataFrame(rows).to_csv(index=False).encode("utf-8-sig"),
                        file_name="dashboard_comparison.csv", mime="text/csv")
 
@@ -472,7 +549,7 @@ def page_dashboard() -> None:
     m1, m2, m3, m4 = st.columns(4)
     m1.metric("総コメント数", f"{len(analyzed):,}")
     neg_all = (analyzed["is_negative"] == 1).mean()
-    m2.metric("否定的コメント率", f"{neg_all:.1%}")
+    m2.metric("否定的コメント率（全コメント中）", f"{neg_all:.1%}")
     m3.metric("最新の異常スコア（Z）", "—" if pd.isna(last["b_z"]) else f"{last['b_z']:.1f}",
               help=f"最後の時間帯（{_fmt_time(table.index[-1])}）の手法BのZスコア。判定状態：{last['b_status']}")
     last_judged = (f"最後に判定できた時間帯：{_fmt_time(judged_idx[-1])}（{table.loc[judged_idx[-1], 'level']}）"
@@ -482,6 +559,15 @@ def page_dashboard() -> None:
                    "検知がなく判定もできなかった時間帯は判定対象外。" + last_judged)
     st.caption(f"期間中の判定結果：{overall_status(summary)}　／　判定できた時間帯 "
                f"{summary['n_judged_bins']} / {summary['n_bins']}　／　{last_judged}")
+    sent = summarize_sentiment(analyzed)
+    lv = table["level"].value_counts()
+    st.caption(
+        "時間帯の内訳：" + "・".join(f"{k} {int(lv.get(k, 0))}" for k in
+                                 [LEVEL_ALERT, LEVEL_CAUTION, LEVEL_NORMAL, LEVEL_UNJUDGED])
+        + f"（全{len(table)}）　／　コメント単位：否定判定率 "
+        + ("—" if pd.isna(sent["neg_rate_judged"]) else f"{sent['neg_rate_judged']:.1%}")
+        + f"（{sent['n_negative']:,} ÷ 判定できた {sent['n_judged']:,}件）、カバー率 {sent['coverage']:.1%}、"
+        f"判定不能 {sent['n_unknown']:,}件")
 
     a_counts = table["a_status"].value_counts()
     st.caption(
@@ -534,7 +620,8 @@ def page_dashboard() -> None:
 
     with st.expander("時間帯ごとの全指標（CSVで保存可）"):
         st.dataframe(table)
-    st.download_button("検知結果（時間帯ごと）をCSVで保存", time_series_to_csv_bytes(table),
+    st.download_button("検知結果（時間帯ごと）をCSVで保存",
+                       time_series_to_csv_bytes(add_dictionary_column(table, det["dict"]["dictionary"])),
                        file_name=f"detection_{video}.csv", mime="text/csv")
     st.caption(f"計算時間：手法A {res.seconds['A']:.3f}秒、手法B {res.seconds['B']:.3f}秒、"
                f"手法C {res.seconds['C']:.2f}秒")
@@ -593,7 +680,8 @@ def page_comparison() -> None:
                 "検知時刻（最大5件）": "、".join(_fmt_time(t) for t in times[:5]) + ("…" if len(times) > 5 else ""),
                 "計算時間(秒)": r["result"].seconds.get(d, float("nan")) if d in ("A", "B", "C") else float("nan"),
             })
-    detail = pd.DataFrame(rows)
+    detail = add_dictionary_column(pd.DataFrame(rows), det["dict"]["dictionary"])
+    st.caption(f"使用した辞書：{det['dict']['dictionary']}")
     st.dataframe(detail, hide_index=True)
     total = {k: sum(r["result"].seconds.get(k, 0.0) for r in results.values()) for k in ("A", "B", "C")}
     st.caption(f"計算時間の合計：手法A {total['A']:.3f}秒、手法B {total['B']:.3f}秒、手法C {total['C']:.2f}秒"
@@ -630,7 +718,8 @@ def page_comparison() -> None:
     n_excluded = per_video.loc[per_video["outcome"] == "対象外", "video_id"].nunique()
     if n_excluded:
         st.warning(f"判定できた時間帯がない動画 {n_excluded} 本は「判定対象外」として指標から除外しました。")
-    summary = summarize(per_video, n_boot=200)
+    summary = add_dictionary_column(summarize(per_video, n_boot=200), det["dict"]["dictionary"])
+    per_video = add_dictionary_column(per_video, det["dict"]["dictionary"])
     cols = ["detector", "説明", "検知(TP)", "見逃し(FN)", "誤警戒動画(FP)", "沈黙(TN)", "Precision",
             "Recall", "Recall_95CI", "F1", "誤警戒率_動画", "誤警戒_100時間あたり",
             "遅れ_中央値(h)", "遅れを測れた動画数", "判定対象外で除外した動画数"]

@@ -72,6 +72,7 @@ def make_analyzer(choice: str):
     if choice == "auto":
         private = find_private_dictionaries()
         path, kind = (private[0], "nrc") if private else (SIMPLE_DICTIONARY_PATH, "simple")
+        # private[0] は Japanese-NRC-EmoLex.txt があればそれ（find_private_dictionaries の並び順）
     elif choice == "simple":
         path, kind = SIMPLE_DICTIONARY_PATH, "simple"
     else:

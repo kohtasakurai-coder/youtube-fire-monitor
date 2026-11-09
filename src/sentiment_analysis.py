@@ -39,6 +39,10 @@ from src.config import EMOTIONS, NEGATIVE_EMOTIONS
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 SIMPLE_DICTIONARY_PATH = PROJECT_ROOT / "data" / "sentiment_dictionary.csv"
 PRIVATE_DICTIONARY_DIR = PROJECT_ROOT / "data" / "dictionaries" / "private"
+# ローカル研究版で優先して使うNRC日本語辞書のファイル名（再配布不可のため GitHub・クラウドには置かない）
+NRC_FILENAME = "Japanese-NRC-EmoLex.txt"
+NRC_DEFAULT_PATH = PRIVATE_DICTIONARY_DIR / NRC_FILENAME
+SIMPLE_LABEL = "簡易辞書（自作・公開デモ用）"
 
 MAX_PHRASE_TOKENS = 4          # 何語までの連続を1つの見出し語として照合するか
 NEGATION_BASES = {"ない", "無い", "ぬ", "ん", "ず"}
@@ -169,12 +173,46 @@ def load_nrc_dictionary(path: str | Path) -> EmotionDictionary:
 
 
 def find_private_dictionaries(folder: str | Path = PRIVATE_DICTIONARY_DIR) -> list[Path]:
-    """非公開フォルダにある辞書ファイル（.txt / .tsv / .csv）を返す。なければ空。"""
+    """
+    非公開フォルダにある辞書ファイル（.txt / .tsv / .csv）を返す。なければ空。
+    NRC日本語辞書（Japanese-NRC-EmoLex.txt）があれば先頭にする。README は辞書ではないので除く。
+    """
     folder = Path(folder)
     if not folder.is_dir():
         return []
-    return sorted(p for p in folder.iterdir()
-                  if p.is_file() and p.suffix.lower() in {".txt", ".tsv", ".csv"})
+    found = [p for p in folder.iterdir()
+             if p.is_file() and p.suffix.lower() in {".txt", ".tsv", ".csv"}
+             and not p.stem.lower().startswith("readme")]
+    return sorted(found, key=lambda p: (p.name != NRC_FILENAME, p.name))
+
+
+@dataclass(frozen=True)
+class DictionaryChoice:
+    label: str     # 画面に出す名前
+    path: str
+    kind: str      # "nrc" / "simple"
+
+
+def dictionary_choices(private_paths: Iterable[Path], public_mode: bool) -> tuple[list[DictionaryChoice], int]:
+    """
+    画面で選べる辞書と、初期選択の位置を返す。
+      - 公開デモ（クラウド）：簡易辞書だけ（NRC辞書本体はクラウドに置かない）
+      - ローカル研究版：非公開フォルダのNRC辞書があればそれを初期選択。簡易辞書にも切り替えられる
+    """
+    simple = DictionaryChoice(SIMPLE_LABEL, str(SIMPLE_DICTIONARY_PATH), "simple")
+    if public_mode:
+        return [simple], 0
+    nrc = [DictionaryChoice(f"NRC日本語辞書（{p.name}）" if p.name == NRC_FILENAME
+                            else f"非公開フォルダ：{p.name}（NRC形式）", str(p), "nrc")
+           for p in private_paths]
+    return nrc + [simple], 0
+
+
+def add_dictionary_column(df: pd.DataFrame, dictionary_name: str) -> pd.DataFrame:
+    """結果のCSVに、使った辞書の名前を残すための列を付ける（元の表は変更しない）。"""
+    out = df.copy()
+    out["dictionary"] = dictionary_name
+    return out
 
 
 # ---------------------------------------------------------------------------
@@ -286,6 +324,7 @@ class SentimentAnalyzer:
         out["n_negated"] = [len(r.negated) for r in results]
         out["matched_words"] = [";".join(r.matched) for r in results]
         out["negated_words"] = [";".join(r.negated) for r in results]
+        out["dictionary"] = self.dictionary.name          # どの辞書で判定したかをCSVに残す
         return out
 
 
@@ -305,6 +344,32 @@ def summarize_sentiment(analyzed: pd.DataFrame) -> dict:
         "neg_rate_judged": n_neg / n_judged if n_judged else float("nan"),  # 分母＝判定可能
         "n_negated_words": int(analyzed["n_negated"].sum()),
     }
+
+
+EMOTION_LABELS_JA = {"anger": "怒り", "fear": "恐怖", "sadness": "悲しみ", "joy": "喜び", "trust": "信頼"}
+
+
+def emotion_summary(analyzed: pd.DataFrame) -> pd.DataFrame:
+    """
+    感情別の集計。判定不能（辞書に一致する語なし）のコメントは分母に入れない。
+      該当コメント数 ＝ その感情の語を1つ以上含むコメント数（score_e > 0）
+      割合           ＝ 該当コメント数 ÷ 判定できたコメント数
+      平均スコア     ＝ 判定できたコメントでの score_e の平均
+    """
+    judged = analyzed["is_negative"].notna()
+    n_judged = int(judged.sum())
+    rows = []
+    for e in EMOTIONS:
+        sc = pd.to_numeric(analyzed.loc[judged, e], errors="coerce")
+        hit = int((sc > 0).sum())
+        rows.append({
+            "感情": EMOTION_LABELS_JA.get(e, e), "emotion": e,
+            "否定的感情": e in NEGATIVE_EMOTIONS,
+            "該当コメント数": hit,
+            "判定できたコメントに占める割合": hit / n_judged if n_judged else float("nan"),
+            "平均スコア（判定できたコメント）": float(sc.mean()) if n_judged else float("nan"),
+        })
+    return pd.DataFrame(rows)
 
 
 def evaluate_negative_detection(pred: pd.Series, gold: pd.Series) -> dict:

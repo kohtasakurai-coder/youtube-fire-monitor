@@ -209,3 +209,52 @@ def test_janome_known_limitations(janome_analyzer):
     """限界の記録：皮肉は判定不能、「怖いくらい早い」は否定的と誤判定する。"""
     assert janome_analyzer.analyze_text("さすがですね（笑）").status == STATUS_UNKNOWN
     assert janome_analyzer.analyze_text("怖いくらい対応が早い").status == STATUS_NEGATIVE
+
+
+# ---------------------------------------------------------------------------
+# 辞書の選択・感情別集計・辞書名の記録
+# ---------------------------------------------------------------------------
+def test_dictionary_choices_prefer_nrc_locally_and_simple_in_public(tmp_path):
+    from src.sentiment_analysis import NRC_FILENAME, SIMPLE_LABEL, dictionary_choices, find_private_dictionaries
+    (tmp_path / "README.md").write_text("x", encoding="utf-8")
+    (tmp_path / "another.tsv").write_text("word\temotion\n怒り\tanger\n", encoding="utf-8")
+    (tmp_path / NRC_FILENAME).write_text("x", encoding="utf-8")
+    found = find_private_dictionaries(tmp_path)
+    assert [p.name for p in found] == [NRC_FILENAME, "another.tsv"]   # README は除外、NRCが先頭
+
+    local, idx = dictionary_choices(found, public_mode=False)
+    assert local[idx].kind == "nrc" and local[idx].label == f"NRC日本語辞書（{NRC_FILENAME}）"
+    assert SIMPLE_LABEL in [c.label for c in local]                    # 簡易辞書にも切り替えられる
+
+    public, idx = dictionary_choices(found, public_mode=True)
+    assert [c.label for c in public] == [SIMPLE_LABEL] and idx == 0    # クラウドはNRCを使わない
+
+    none, idx = dictionary_choices([], public_mode=False)
+    assert none[idx].label == SIMPLE_LABEL                             # NRCがなければ簡易辞書
+
+
+def test_emotion_summary_uses_judged_comments_as_denominator():
+    import math
+    from src.sentiment_analysis import emotion_summary
+    df = pd.DataFrame({
+        "is_negative": [1.0, 0.0, float("nan"), 1.0],
+        "anger": [1.0, 0.0, float("nan"), 0.5], "fear": [0.0, 0.0, float("nan"), 0.5],
+        "sadness": [0.0, 0.0, float("nan"), 0.0], "joy": [0.0, 1.0, float("nan"), 0.0],
+        "trust": [0.0, 0.0, float("nan"), 0.0],
+    })
+    out = emotion_summary(df).set_index("emotion")
+    assert out.loc["anger", "該当コメント数"] == 2
+    assert math.isclose(out.loc["anger", "判定できたコメントに占める割合"], 2 / 3)   # 判定不能1件は分母に入れない
+    assert math.isclose(out.loc["anger", "平均スコア（判定できたコメント）"], 0.5)
+    assert out.loc["joy", "該当コメント数"] == 1 and not out.loc["joy", "否定的感情"]
+
+
+def test_analyze_records_dictionary_name():
+    from src.sentiment_analysis import add_dictionary_column
+    d = EmotionDictionary({"最悪": frozenset({"anger"})}, name="テスト辞書")
+    analyzer = SentimentAnalyzer(d, tokenizer=FakeTokenizer())
+    out = analyzer.analyze(pd.DataFrame({"text": ["最悪/最悪/形容動詞", "普通/普通/名詞"]}))
+    assert (out["dictionary"] == "テスト辞書").all()
+    assert list(out["sentiment_status"]) == ["否定的", "判定不能"]
+    ts = add_dictionary_column(pd.DataFrame({"n": [1]}), "テスト辞書")
+    assert ts["dictionary"].iloc[0] == "テスト辞書"
