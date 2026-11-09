@@ -44,7 +44,7 @@ def test_sentiment_section_on_sample_data():
     assert labels["コメント数不足の時間帯"].endswith("/ 120")   # SYN_FIRE01 は120時間分
     assert any("使用した辞書" in m.value and "簡易辞書" in m.value for m in at.markdown)
     assert any("判定できたコメント" in c.value and "÷" in c.value for c in at.caption)   # 分母の明記
-    emo = at.dataframe[0].value
+    emo = next(table.value for table in at.dataframe if "感情" in table.value.columns)
     assert list(emo["感情"]) == ["怒り", "恐怖", "悲しみ", "喜び", "信頼"]
 
 
