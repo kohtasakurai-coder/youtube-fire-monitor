@@ -37,3 +37,22 @@ def test_event_window_before_and_after():
     c = det.set_index("detector").loc["C"]
     assert c["基準から検知まで(h)"] >= 1.0                 # PELT は変化の後に検知（検知時刻で数える）
     assert len(window) == 24 and "judged" in window.columns
+
+
+def test_observation_summary_separates_unjudged_from_no_alert():
+    from src.event_study import OBSERVATION_CATEGORIES, observation_summary
+    from tests.test_anomaly import make_ts
+    # 履歴不足だけ：すべて「判定対象外（検知なし）」で、「警戒なし（正常）」は0
+    r = run_detection(make_ts([30] * 20, [3] * 20), AnalysisConfig())
+    s = observation_summary(r.table)
+    assert s["判定できた時間帯"] == 0 and s["判定対象外（検知なし）"] == 20
+    assert s["判定した：警戒なし（正常）"] == 0
+    # 判定できる非炎上データ：24時間後から「判定した：警戒なし（正常）」
+    r2 = run_detection(make_ts([30] * 60, [9] * 60), AnalysisConfig())
+    s2 = observation_summary(r2.table)
+    assert s2["判定対象外（検知なし）"] == 24 and s2["判定した：警戒なし（正常）"] == 36
+    assert sum(s2[c] for c in OBSERVATION_CATEGORIES) == s2["時間帯数"] == 60
+    # 期間で絞り込み
+    t0 = r2.table.index[30]
+    s3 = observation_summary(r2.table, start=t0, end=t0 + pd.Timedelta(hours=5))
+    assert s3["時間帯数"] == 5 and s3["判定した：警戒なし（正常）"] == 5

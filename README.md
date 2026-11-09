@@ -169,6 +169,9 @@ $env:YOUTUBE_API_KEY = (Read-Host "APIキー" -AsSecureString | ConvertFrom-Secu
 # 予備評価：基準時刻（会見開始など）の前後比較。正解ラベル（炎上開始）とは別に扱う
 .venv\Scripts\python.exe -m experiments.compare_methods event --csv data/research/comments_（動画ID）_（日時）.csv --event 2025-01-27T16:00:00+09:00 --before 24 --after 24
 
+# 観測できる時間帯を数える（判定対象外と「判定したが警戒なし」を分けて集計）
+.venv\Scripts\python.exe -m experiments.compare_methods observe --csv data\research\（CSV1） data\research\（CSV2） --start 2025-09-09T00:00:00+09:00 --end 2025-09-19T00:00:00+09:00
+
 # 論文用の表と図（results\report\ に出力。架空データの結果なら --from results/demo_synthetic）
 .venv\Scripts\python.exe -m experiments.compare_methods report
 ```

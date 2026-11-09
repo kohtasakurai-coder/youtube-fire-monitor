@@ -290,6 +290,37 @@ def cmd_gold_sample(args) -> None:
         print(f"不足 {args.n - len(out)} 件：動画を追加して同じ seed で再実行すると、既に選んだ候補は変わらずに追加されます。")
 
 
+def cmd_observe(args) -> None:
+    """同じ集計幅・判定条件で、各動画の観測できる時間帯を数える（判定対象外と警戒なしを分ける）。"""
+    from src.config import AnalysisConfig
+    from src.detection import run_detection
+    from src.event_study import observation_summary
+    from src.preprocessing import load_comments_csv
+    from src.time_series import aggregate_time_series
+
+    analyzer, info = make_analyzer(args.dictionary)
+    cfg = AnalysisConfig()
+    rows = []
+    for path in args.csv:
+        comments, _ = load_comments_csv(path)
+        for vid, g in (comments.groupby("video_id") if "video_id" in comments.columns else [("video", comments)]):
+            analyzed = analyzer.analyze(g)
+            ts = aggregate_time_series(analyzed, freq=args.freq, ma_window=cfg.moving_average_window,
+                                       min_comments=cfg.min_comments_reliable)
+            res = run_detection(ts, cfg, include_offline=False)
+            start = pd.Timestamp(args.start) if args.start else None
+            end = pd.Timestamp(args.end) if args.end else None
+            row = {"video_id": vid, "最初のコメント": g["published_at"].min(), "最後のコメント": g["published_at"].max(),
+                   "全コメント数": len(g), "返信": int(g["is_reply"].sum()),
+                   **observation_summary(res.table, start, end)}
+            rows.append(row)
+    out = pd.DataFrame(rows)
+    print(f"辞書：{info['dictionary']}（{info['n_words']}語）　集計幅：{args.freq}　判定条件：既定（24時間の履歴・10件以上）")
+    with pd.option_context("display.width", 250, "display.max_columns", 30):
+        print(out.T.to_string(header=False))
+    save(out, Path(args.results_dir) / "observe" / f"observe_{args.freq}.csv")
+
+
 def cmd_report(args) -> None:
     from src.report import build_report
 
@@ -360,6 +391,14 @@ def main(argv=None) -> int:
     s.add_argument("--seed", default="gold-2026")
     s.add_argument("--out", default=str(PROJECT_ROOT / "data" / "research" / "sentiment_gold_candidates.csv"))
     s.set_defaults(func=cmd_gold_sample)
+
+    s = sub.add_parser("observe", help="観測できる時間帯を数える（判定対象外と警戒なしを分ける）")
+    s.add_argument("--csv", nargs="+", required=True)
+    s.add_argument("--start", default="", help="例 2025-09-09T00:00:00+09:00")
+    s.add_argument("--end", default="", help="例 2025-09-19T00:00:00+09:00（この時刻は含まない）")
+    s.add_argument("--freq", default="1h")
+    s.add_argument("--dictionary", default="auto")
+    s.set_defaults(func=cmd_observe)
 
     s = sub.add_parser("report", help="論文用の表と図を作る")
     s.add_argument("--from", dest="source", default="", help="結果のフォルダ（既定 results/）")

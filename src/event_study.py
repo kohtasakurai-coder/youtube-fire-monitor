@@ -88,3 +88,44 @@ def event_window(table: pd.DataFrame, comments: pd.DataFrame, event_time: pd.Tim
     cols = ["n_comments", "n_negative", "neg_rate", "judged", "judged_methods",
             "a_alarm", "b_alarm", "c_alarm", "level"]
     return summary, pd.DataFrame(rows), window[[c for c in cols if c in window.columns]]
+
+
+OBSERVATION_CATEGORIES = [
+    "判定対象外（検知なし）",
+    "判定対象外（直前の検知で注意）",
+    "判定した：警戒",
+    "判定した：注意",
+    "判定した：警戒なし（正常）",
+]
+
+
+def observation_summary(table: pd.DataFrame, start=None, end=None) -> dict:
+    """
+    期間 [start, end) の時間帯を、判定したかどうかと警戒レベルで分けて数える。
+    「判定対象外」は「警戒なし」と別に数える（判定していない時間帯を正常とみなさない）。
+      判定対象外（直前の検知で注意）：その時間帯は判定条件を満たさないが、直近3時間の検知で注意になっている
+    """
+    t = table
+    if start is not None:
+        t = t[t.index >= pd.Timestamp(start)]
+    if end is not None:
+        t = t[t.index < pd.Timestamp(end)]
+    judged = t["judged"].astype(bool) if len(t) else pd.Series(dtype=bool)
+    level = t["level"] if len(t) else pd.Series(dtype=object)
+    cats = {
+        OBSERVATION_CATEGORIES[0]: int((~judged & ~level.isin(["注意", "警戒"])).sum()),
+        OBSERVATION_CATEGORIES[1]: int((~judged & level.isin(["注意", "警戒"])).sum()),
+        OBSERVATION_CATEGORIES[2]: int((judged & (level == LEVEL_ALERT)).sum()),
+        OBSERVATION_CATEGORIES[3]: int((judged & (level == "注意")).sum()),
+        OBSERVATION_CATEGORIES[4]: int((judged & (level == "正常")).sum()),
+    }
+    a_ok = int((t["a_status"] == "判定").sum()) if len(t) else 0
+    b_ok = int((t["b_status"] == "判定").sum()) if len(t) else 0
+    return {
+        "期間の開始": t.index.min() if len(t) else None, "期間の終わり（最後の時間帯）": t.index.max() if len(t) else None,
+        "時間帯数": len(t), "コメント数": int(t["n_comments"].sum()) if len(t) else 0,
+        "判定できた時間帯": int(judged.sum()),
+        "手法Aで判定": a_ok, "手法Bで判定": b_ok,
+        "手法Cで判定": int(t["c_evaluated"].sum()) if len(t) else 0,
+        **cats,
+    }
