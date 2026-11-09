@@ -284,3 +284,30 @@ def test_monitored_hours_count_only_judged_bins():
     t["judged"] = [i >= 24 for i in range(100)]
     r = row(evaluate_video(t, label(fire=False, start_bin=None)), "B")
     assert r["monitored_hours"] == 76.0 and r["outcome"] == "FP"
+
+
+def test_fix_config_then_test_without_tuning(synthetic, tmp_path):
+    """調整なし（既定値）で固定 → test は全動画を1回だけ。2回目は止まる。"""
+    import argparse
+    from experiments import compare_methods as cm
+    from src.preprocessing import save_comments_csv
+
+    labels, by_video = synthetic
+    labels = labels.drop(columns=["fire_start"]).copy()
+    labels["split"] = "test"                                   # 分割なし＝全動画を test
+    for v in labels["video_id"]:
+        save_comments_csv(by_video[v], tmp_path / f"{v}.csv")
+    labels["comments_file"] = [str(tmp_path / f"{v}.csv") for v in labels["video_id"]]
+    lp = tmp_path / "labels.csv"
+    labels.to_csv(lp, index=False, encoding="utf-8-sig")
+    ns = argparse.Namespace(labels=lp, protocol_dir=tmp_path / "protocol", results_dir=tmp_path / "results",
+                            dictionary="simple", freq="3h", after_test_reason="", rerun_reason="")
+    cm.cmd_freeze(ns)
+    cm.cmd_fix_config(ns)
+    frozen = json.loads((tmp_path / "protocol" / "frozen_config.json").read_text(encoding="utf-8"))
+    assert frozen["config_id"] == "default" and frozen["freq"] == "3h"
+    cm.cmd_test(argparse.Namespace(**{**vars(ns), "dictionary": "frozen"}))
+    per_video = pd.read_csv(tmp_path / "results" / "test" / "test_per_video.csv", encoding="utf-8-sig")
+    assert per_video["video_id"].nunique() == len(labels)
+    with pytest.raises(ProtocolError):
+        cm.cmd_test(argparse.Namespace(**{**vars(ns), "dictionary": "frozen"}))

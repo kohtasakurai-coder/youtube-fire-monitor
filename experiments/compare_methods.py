@@ -147,6 +147,27 @@ def cmd_tune(args) -> None:
     show(summary[summary["config_id"] == cid])
 
 
+def cmd_fix_config(args) -> None:
+    """
+    調整（tune）をせず、設計書の既定値と指定した集計幅で設定を固定する。
+    動画数が少なく dev/test に分けられない場合に使う（全動画を test として1回だけ評価する）。
+    """
+    from src.config import AnalysisConfig
+
+    proto = Protocol(Path(args.protocol_dir))
+    h = proto.check_labels(args.labels)
+    if proto.test_done_file.exists() and not args.after_test_reason:
+        raise ProtocolError("test の評価後に設定を変えることはできません。")
+    _, dict_info = make_analyzer(args.dictionary)
+    cfg = AnalysisConfig()
+    params = {"freq": args.freq, "方針": "既定値に固定（調整なし）"}
+    payload = config_payload("default", params, cfg, EvalConfig(), dict_info,
+                             {"note": "調整なし。集計幅はコメント量（観測できる時間帯の数）だけで事前に決めた"}, {})
+    payload["selection_rule"] = "調整なし（設計書の既定値）"
+    proto.save_frozen_config(payload, h, args.after_test_reason)
+    print(f"既定値で設定を固定しました（集計幅 {args.freq}、辞書 {dict_info['dictionary']}）。次は test を1回だけ実行します。")
+
+
 def cmd_test(args) -> None:
     proto = Protocol(Path(args.protocol_dir))
     h = proto.check_labels(args.labels)
@@ -354,6 +375,13 @@ def main(argv=None) -> int:
     s.add_argument("--freq", default="", help="例: 30min,1h,3h（既定 1h）")
     s.add_argument("--after-test-reason", default="")
     s.set_defaults(func=cmd_tune)
+
+    s = sub.add_parser("fix-config", help="調整せずに既定値で設定を固定（動画数が少ない場合）")
+    s.add_argument("--labels", required=True)
+    s.add_argument("--freq", default="3h")
+    s.add_argument("--dictionary", default="auto")
+    s.add_argument("--after-test-reason", default="")
+    s.set_defaults(func=cmd_fix_config)
 
     s = sub.add_parser("test", help="固定した設定で test を1回だけ評価")
     s.add_argument("--labels", required=True)
