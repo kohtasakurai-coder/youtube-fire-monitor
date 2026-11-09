@@ -179,6 +179,8 @@ $env:YOUTUBE_API_KEY = (Read-Host "APIキー" -AsSecureString | ConvertFrom-Secu
 .venv\Scripts\python.exe -m experiments.compare_methods report
 ```
 
+本評価をまとめて実行する場合は `experiments\run_main_evaluation.ps1`（採用条件の確認つき）、コメントの一括取得は `experiments\fetch_comments.ps1` を使います（`docs/本評価_動画選定手順.md` 6章）。
+
 - `split`：事件（incident_id）単位で dev／test に分けます（同じ事件の動画が両方に入らない）
 - `freeze-labels`：正解ラベルの SHA-256 を記録します。以後ラベルを変えると `tune`・`test` が止まります。ハッシュの記録（`experiments/protocol/`）は Git にコミットしてください
 - `tune`：dev の動画だけでパラメータを総当たりし、事前に決めた規則（検知器「警戒」の F1 最大など）で1つ選んで固定します
