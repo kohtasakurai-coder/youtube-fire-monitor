@@ -179,7 +179,7 @@ $env:YOUTUBE_API_KEY = (Read-Host "APIキー" -AsSecureString | ConvertFrom-Secu
 .venv\Scripts\python.exe -m experiments.compare_methods report
 ```
 
-本評価をまとめて実行する場合は `experiments\run_main_evaluation.ps1`（採用条件の確認つき）、コメントの一括取得は `experiments\fetch_comments.ps1` を使います（`docs/本評価_動画選定手順.md` 6章）。
+本評価をまとめて実行する場合は `experiments\run_main_evaluation.ps1`（採用条件の確認つき）、コメントの一括取得は `experiments\fetch_comments.ps1` を使います（`docs/本評価_動画選定手順.md` 6章）。動画の選定には、チャンネルの公開動画を期間で一覧にする `python -m src.list_uploads <動画IDかチャンネルID> --start 2025-09-01 --end 2025-09-19`（コメントは取らない）を使います（同 8章）。
 
 - `split`：事件（incident_id）単位で dev／test に分けます（同じ事件の動画が両方に入らない）
 - `freeze-labels`：正解ラベルの SHA-256 を記録します。以後ラベルを変えると `tune`・`test` が止まります。ハッシュの記録（`experiments/protocol/`）は Git にコミットしてください
