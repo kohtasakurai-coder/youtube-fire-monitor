@@ -7,7 +7,8 @@
                または ref_upload_title を含む動画（ref_upload_date に公開）の公開時刻
   炎上動画   ：同じチャンネルで ref の24時間以上前に公開された、コメントが有効で、長さ3分超（ショートを除く）の動画を、
                新しい順に試す（騒動の時点で最新だった動画にコメントが集まりやすいため）
-  比較動画   ：同じチャンネルで ref の30日以上前に評価期間が終わる動画を、新しい順に試す（平常期）
+  比較動画   ：同じチャンネルで ref の30日以上前に評価期間が終わる動画を、新しい順に試す（平常期）。
+               calm_exclude_dates（同じチャンネルの別の騒動の報道日）の7日前〜14日後にかかる期間は除く
   評価期間   ：どちらも120時間。炎上は [ref−72時間, ref+48時間)、比較は [公開+24時間, 公開+144時間)
   採用条件   ：評価期間に判定できる時間帯があること（炎上は ref〜ref+48時間 に1つ以上、比較は期間内に1つ以上）。
                満たさなければ次に新しい動画を試す（各3本まで）。判定できたかどうか以外（警戒の有無など）は見ない
@@ -48,10 +49,12 @@ def resolve_ref(row, uploads: pd.DataFrame) -> tuple[pd.Timestamp | None, str]:
     if str(row.get("ref_time_jst", "")).strip():
         return pd.Timestamp(row["ref_time_jst"]).tz_convert(TZ), ""
     title, day = str(row.get("ref_upload_title", "")).strip(), str(row.get("ref_upload_date", "")).strip()
-    if title and day:
+    if day:
         d0 = pd.Timestamp(day).tz_localize(TZ)
-        hit = uploads[(uploads["published_at_jst"] >= d0) & (uploads["published_at_jst"] < d0 + pd.Timedelta(days=1))
-                      & uploads["title"].str.contains(title, regex=False)]
+        hit = uploads[(uploads["published_at_jst"] >= d0) & (uploads["published_at_jst"] < d0 + pd.Timedelta(days=1))]
+        # タイトルの一部が分かればそれで、分からなければその日最初の通常動画（ショートを除く）をきっかけ動画とする
+        hit = (hit[hit["title"].str.contains(title, regex=False)] if title
+               else hit[hit["duration_sec"].fillna(0) > MIN_DURATION_SEC])
         if len(hit):
             h = hit.sort_values("published_at_jst").iloc[0]
             return h["published_at_jst"], f"（きっかけ動画 {h['video_id']}「{h['title']}」）"
@@ -88,6 +91,8 @@ def main(argv=None) -> int:
     p.add_argument("--freq", default="3h")
     p.add_argument("--max-comments", type=int, default=30000)
     p.add_argument("--dictionary", default="auto")
+    p.add_argument("--overwrite", action="store_true",
+                   help="既存の labels.csv を上書きする（ラベルを固定済み＝protocol に記録があるときは上書きしない）")
     args = p.parse_args(argv)
 
     api_key = get_api_key() or getpass.getpass("YouTube APIキーを入力（表示されません）: ").strip()
@@ -124,10 +129,13 @@ def main(argv=None) -> int:
         print(f"  チャンネル「{ch_title}」（{ch}）　基準時刻 {ref:%Y-%m-%d %H:%M} {note}")
         usable = ups[ups["comment_count"].notna() & (ups["comment_count"] > 0)
                      & (ups["duration_sec"].fillna(0) > MIN_DURATION_SEC)]
-        roles = {
-            "炎上": usable[usable["published_at_jst"] <= ref - 24 * H],
-            "比較": usable[usable["published_at_jst"] + 144 * H <= ref - pd.Timedelta(days=CALM_GAP_DAYS)],
-        }
+        calm = usable[usable["published_at_jst"] + 144 * H <= ref - pd.Timedelta(days=CALM_GAP_DAYS)]
+        # 同じチャンネルの別の騒動（報道日）の 7日前〜14日後 にかかる評価期間は平常期とみなさない
+        for d in [x for x in str(inc.get("calm_exclude_dates", "")).split(";") if x.strip()]:
+            d = pd.Timestamp(d.strip()).tz_localize(TZ)
+            lo, hi = d - pd.Timedelta(days=7), d + pd.Timedelta(days=14)
+            calm = calm[(calm["published_at_jst"] + 144 * H <= lo) | (calm["published_at_jst"] + 24 * H >= hi)]
+        roles = {"炎上": usable[usable["published_at_jst"] <= ref - 24 * H], "比較": calm}
         for role, cands in roles.items():
             adopted = False
             for _, v in cands.sort_values("published_at_jst", ascending=False).head(MAX_TRIES).iterrows():
@@ -168,7 +176,8 @@ def main(argv=None) -> int:
                         "is_fire": "1" if role == "炎上" else "0",
                         "fire_start_jst": ref.isoformat() if role == "炎上" else "",
                         "label_source": (inc["label_source"] + note) if role == "炎上" else
-                        f"同じチャンネルの平常期（基準時刻の{CALM_GAP_DAYS}日以上前に評価期間が終わる動画）。期間内の騒動報道の有無：未確認",
+                        f"同じチャンネルの平常期（基準時刻の{CALM_GAP_DAYS}日以上前に評価期間が終わる動画。"
+                        f"除外した別の騒動の報道日：{inc.get('calm_exclude_dates', '') or 'なし'}）。期間内の騒動報道の有無：未確認",
                         "split": "", "comments_file": rec["comments_file"],
                         "eval_start_jst": win[0].isoformat(), "eval_end_jst": win[1].isoformat(),
                     })
@@ -183,7 +192,8 @@ def main(argv=None) -> int:
     lab = pd.DataFrame(labels)
     labels_out = Path(args.labels_out)
     if len(lab):
-        if labels_out.exists():   # 既存のラベル（固定済みかもしれない）は上書きしない
+        frozen = (PROJECT_ROOT / "experiments" / "protocol" / "labels_sha256.txt").exists()
+        if labels_out.exists() and (not args.overwrite or frozen):   # 既存（固定済みかもしれない）は上書きしない
             labels_out = labels_out.with_name(labels_out.stem + "_draft.csv")
             print(f"既存の {args.labels_out} は上書きせず、{labels_out} に書きます。")
         labels_out.parent.mkdir(parents=True, exist_ok=True)
