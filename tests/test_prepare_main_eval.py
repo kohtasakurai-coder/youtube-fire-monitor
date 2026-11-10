@@ -13,7 +13,7 @@ def test_prepare_selects_by_rule_and_writes_labels(tmp_path, monkeypatch):
     (tmp_path / "data" / "research").mkdir(parents=True)
     monkeypatch.setattr(pm, "PROJECT_ROOT", tmp_path)
     monkeypatch.setattr(pm, "CALM_GAP_DAYS", 0)
-    monkeypatch.setenv("YOUTUBE_API_KEY", "TEST")
+    monkeypatch.setenv("YOUTUBE_API_KEY", "AIza" + "x" * 35)
     sample, _ = load_comments_csv(SAMPLE)
     t = lambda s: pd.Timestamp(s, tz=TZ)   # noqa: E731
 
@@ -64,3 +64,10 @@ def test_prepare_selects_by_rule_and_writes_labels(tmp_path, monkeypatch):
                     "--labels-out", str(tmp_path / "data" / "research" / "labels.csv")]) == 0
     assert (tmp_path / "data" / "research" / "labels_draft.csv").exists()
     assert fetched == ["SYN_FIRE01", "SYN_NORMAL01"]          # 取得済みのCSVを再利用
+
+
+def test_placeholder_key_stops_before_any_request(monkeypatch, capsys):
+    monkeypatch.setenv("YOUTUBE_API_KEY", "（手元のキー）")
+    monkeypatch.setattr(pm, "resolve_channel_id", lambda *a: (_ for _ in ()).throw(AssertionError("called")))
+    assert pm.main([]) == 1
+    assert "APIキーの形式ではありません" in capsys.readouterr().err

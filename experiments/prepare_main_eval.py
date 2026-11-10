@@ -24,6 +24,7 @@ from __future__ import annotations
 
 import argparse
 import getpass
+import re
 import sys
 from pathlib import Path
 
@@ -90,8 +91,9 @@ def main(argv=None) -> int:
     args = p.parse_args(argv)
 
     api_key = get_api_key() or getpass.getpass("YouTube APIキーを入力（表示されません）: ").strip()
-    if not api_key:
-        print("APIキーがありません。", file=sys.stderr)
+    if not re.fullmatch(r"AIza[0-9A-Za-z_-]{35}", api_key or ""):
+        print("APIキーの形式ではありません（AIza で始まる39文字）。Google Cloud でキーをコピーし直してください。",
+              file=sys.stderr)
         return 1
     analyzer, info = make_analyzer(args.dictionary)
     cfg = AnalysisConfig()
@@ -188,7 +190,8 @@ def main(argv=None) -> int:
         lab.to_csv(labels_out, index=False, encoding="utf-8-sig")
     n_fire = int((lab["is_fire"] == "1").sum()) if len(lab) else 0
     print(f"\n辞書：{info['dictionary']}　集計幅：{args.freq}")
-    print(f"採用：炎上 {n_fire} 本・比較 {len(lab) - n_fire} 本 → {labels_out}")
+    print(f"採用：炎上 {n_fire} 本・比較 {len(lab) - n_fire} 本"
+          + (f" → {labels_out}" if len(lab) else "（labels.csv は作っていません）"))
     print(f"選定の記録 → {out_log}")
     print("比較動画の期間に騒動の報道がないかを確認してから、experiments\\run_main_evaluation.ps1 を実行してください。")
     return 0
