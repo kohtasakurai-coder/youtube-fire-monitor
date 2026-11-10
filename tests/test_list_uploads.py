@@ -15,10 +15,10 @@ def _fake_api(pages):
             return {"items": [{"contentDetails": {"relatedPlaylists": {"uploads": "UUxyz"}}}]}
         if url == lu.PLAYLIST_ITEMS_URL:
             return pages[params.get("pageToken", "p0")]
-        if url == lu.VIDEOS_URL and params["part"] == "statistics":
+        if url == lu.VIDEOS_URL and params["part"].startswith("statistics"):
             ids = params["id"].split(",")
-            return {"items": [{"id": v, "statistics": ({} if v == "vidOFF00000" else {"commentCount": "120"})}
-                              for v in ids]}
+            return {"items": [{"id": v, "statistics": ({} if v == "vidOFF00000" else {"commentCount": "120"}),
+                               "contentDetails": {"duration": "PT1M5S"}} for v in ids]}
         raise AssertionError(url)
     return fake, calls
 
@@ -53,3 +53,9 @@ def test_channel_id_is_used_directly(monkeypatch):
     df = lu.list_uploads("UC" + "b" * 22, "KEY", "2025-09-01", "2025-09-19")
     assert df.empty
     assert not any(c[0] == lu.VIDEOS_URL for c in calls)                       # 動画情報は引かない
+
+
+def test_parse_duration():
+    assert lu.parse_duration("PT1H2M3S") == 3723.0
+    assert lu.parse_duration("PT45S") == 45.0
+    assert lu.parse_duration("P1DT1S") == 86401.0

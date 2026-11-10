@@ -24,6 +24,7 @@ from __future__ import annotations
 
 import argparse
 import getpass
+import re
 import sys
 from pathlib import Path
 
@@ -33,6 +34,7 @@ from src.preprocessing import extract_video_id
 from src.youtube_api import VIDEOS_URL, YouTubeAPIError, _get_json, get_api_key
 
 CHANNELS_URL = "https://www.googleapis.com/youtube/v3/channels"
+SEARCH_URL = "https://www.googleapis.com/youtube/v3/search"
 PLAYLIST_ITEMS_URL = "https://www.googleapis.com/youtube/v3/playlistItems"
 TZ = "Asia/Tokyo"
 
@@ -42,11 +44,31 @@ def _ts(value: str) -> pd.Timestamp:
     return (t.tz_localize(TZ) if t.tzinfo is None else t).tz_convert(TZ)
 
 
+def parse_duration(text: str) -> float:
+    """ISO 8601 の動画の長さ（例 PT1H2M3S）を秒にする。"""
+    m = re.fullmatch(r"P(?:(\d+)D)?T?(?:(\d+)H)?(?:(\d+)M)?(?:(\d+)S)?", text or "")
+    if not m:
+        return float("nan")
+    d, h, mi, se = (int(x) if x else 0 for x in m.groups())
+    return float(d * 86400 + h * 3600 + mi * 60 + se)
+
+
 def resolve_channel_id(video_or_channel: str, api_key: str, timeout: float = 30) -> str:
     """チャンネルID（UC…）ならそのまま、動画ID/URLならその動画のチャンネルIDを返す。"""
     s = video_or_channel.strip()
     if s.startswith("UC") and len(s) == 24:
         return s
+    if s.startswith("@"):                       # ハンドル（@xxxx）
+        data = _get_json(CHANNELS_URL, {"key": api_key, "part": "id", "forHandle": s}, api_key, timeout)
+        if not data.get("items"):
+            raise YouTubeAPIError(f"ハンドル {s} のチャンネルが見つかりません。", reason="channelNotFound")
+        return data["items"][0]["id"]
+    if s.startswith("search:"):                 # チャンネル名で検索（100単位。最上位の結果を使う）
+        data = _get_json(SEARCH_URL, {"key": api_key, "part": "snippet", "type": "channel",
+                                      "q": s[len("search:"):], "maxResults": 1}, api_key, timeout)
+        if not data.get("items"):
+            raise YouTubeAPIError(f"{s} に当たるチャンネルが見つかりません。", reason="channelNotFound")
+        return data["items"][0]["snippet"]["channelId"]
     vid = extract_video_id(s)
     data = _get_json(VIDEOS_URL, {"key": api_key, "part": "snippet", "id": vid}, api_key, timeout)
     items = data.get("items", [])
@@ -91,20 +113,25 @@ def list_uploads(video_or_channel: str, api_key: str, start: str, end: str,
 
     out = pd.DataFrame(rows, columns=["video_id", "title", "published_at_jst"])
     counts: dict[str, int | None] = {}
+    durations: dict[str, float] = {}
     for i in range(0, len(out), 50):
         ids = ",".join(out["video_id"].iloc[i:i + 50])
-        data = _get_json(VIDEOS_URL, {"key": api_key, "part": "statistics", "id": ids}, api_key, timeout)
+        data = _get_json(VIDEOS_URL, {"key": api_key, "part": "statistics,contentDetails", "id": ids},
+                         api_key, timeout)
         for it in data.get("items", []):
             c = it.get("statistics", {}).get("commentCount")
             counts[it["id"]] = int(c) if c is not None else None
+            d = it.get("contentDetails", {}).get("duration")
+            durations[it["id"]] = parse_duration(d) if d else float("nan")
     out["comment_count"] = out["video_id"].map(lambda v: counts.get(v)).astype("Int64")
+    out["duration_sec"] = out["video_id"].map(lambda v: durations.get(v, float("nan")))
     out["channel_id"] = channel_id
     return out.sort_values("published_at_jst", ascending=False).reset_index(drop=True)
 
 
 def main(argv: list[str] | None = None) -> int:
     p = argparse.ArgumentParser(description="チャンネルの公開動画を期間で一覧にする（コメントは取得しない）")
-    p.add_argument("target", help="動画ID・動画URL・チャンネルID（UC…）のいずれか")
+    p.add_argument("target", help="動画ID・動画URL・チャンネルID（UC…）・ハンドル（@…）・search:チャンネル名 のいずれか")
     p.add_argument("--start", required=True, help="例 2025-09-01（JST、この日時を含む）")
     p.add_argument("--end", required=True, help="例 2025-09-19（JST、この日時を含まない）")
     p.add_argument("--out", default=None)
@@ -127,7 +154,7 @@ def main(argv: list[str] | None = None) -> int:
     out.parent.mkdir(parents=True, exist_ok=True)
     df.to_csv(out, index=False, encoding="utf-8-sig")
     show = df.assign(published_at_jst=df["published_at_jst"].dt.strftime("%Y-%m-%d %H:%M"))
-    print(show[["published_at_jst", "video_id", "comment_count", "title"]].to_string(index=False))
+    print(show[["published_at_jst", "video_id", "comment_count", "duration_sec", "title"]].to_string(index=False))
     print(f"→ {out}（{len(df)}本。comment_count が空の動画はコメント無効）")
     return 0
 

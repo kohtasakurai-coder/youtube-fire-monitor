@@ -311,3 +311,36 @@ def test_fix_config_then_test_without_tuning(synthetic, tmp_path):
     assert per_video["video_id"].nunique() == len(labels)
     with pytest.raises(ProtocolError):
         cm.cmd_test(argparse.Namespace(**{**vars(ns), "dictionary": "frozen"}))
+
+
+# ---------------------------------------------------------------- 評価期間（動画ごとに同じ長さで比べる）
+def test_eval_window_limits_counting_to_the_period():
+    """評価期間の外の警報は数えない。監視時間も期間内の時間帯だけ。"""
+    lab = label(fire=False, start_bin=None)
+    lab["eval_start"], lab["eval_end"] = T0 + pd.Timedelta(hours=20), T0 + pd.Timedelta(hours=40)
+    r = row(evaluate_video(table_with(alarms_b=[10, 60]), lab), "B")
+    assert r["outcome"] == "TN" and r["monitored_hours"] == 20.0
+    r = row(evaluate_video(table_with(alarms_b=[10, 30]), lab), "B")
+    assert r["outcome"] == "FP" and r["false_alarm_events"] == 1
+
+
+def test_eval_window_for_fire_counts_only_pre_start_alarms_inside_window():
+    lab = label(start_bin=50)
+    lab["eval_start"], lab["eval_end"] = T0 + pd.Timedelta(hours=40), T0 + pd.Timedelta(hours=90)
+    r = row(evaluate_video(table_with(alarms_a=[5, 45, 55]), lab), "A")
+    assert r["outcome"] == "TP" and r["delay_hours"] == 5.0
+    assert r["false_alarm_events"] == 1                       # 45 だけ（5 は評価期間の外）
+    assert r["monitored_hours"] == 10.0                       # 40〜49
+
+
+def test_validate_labels_eval_window_errors():
+    base = {"video_id": "V1", "incident_id": "I1", "is_fire": "1",
+            "fire_start_jst": "2026-01-03T00:00:00+09:00", "label_source": "x", "split": ""}
+    ok = validate_labels(pd.DataFrame([{**base, "eval_start_jst": "2026-01-01T00:00:00+09:00",
+                                        "eval_end_jst": "2026-01-06T00:00:00+09:00"}]))
+    assert ok["eval_end"].iloc[0] - ok["eval_start"].iloc[0] == pd.Timedelta(days=5)
+    assert pd.isna(validate_labels(pd.DataFrame([base]))["eval_start"].iloc[0])   # 列がなくてもよい
+    for bad in ({"eval_start_jst": "2026-01-01T00:00:00+09:00", "eval_end_jst": ""},
+                {"eval_start_jst": "2026-01-04T00:00:00+09:00", "eval_end_jst": "2026-01-06T00:00:00+09:00"}):
+        with pytest.raises(ValueError):
+            validate_labels(pd.DataFrame([{**base, **bad}]))

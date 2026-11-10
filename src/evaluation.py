@@ -127,6 +127,38 @@ def validate_labels(df: pd.DataFrame, require_split: bool = False) -> pd.DataFra
         if row["is_fire"] == "0" and text:
             errors.append(f"非炎上動画に炎上開始時刻があります: {row['video_id']}")
     df["fire_start"] = pd.Series(starts, index=df.index, dtype="datetime64[ns, Asia/Tokyo]")
+
+    # 評価期間（任意）：eval_start_jst〜eval_end_jst（終わりは含まない）。
+    # 検知は動画の全履歴で計算し、指標はこの期間の時間帯だけで数える（動画ごとに同じ長さの期間で比べるため）
+    for col in ("eval_start_jst", "eval_end_jst"):
+        if col not in df.columns:
+            df[col] = ""
+    es, ee = [], []
+    for _, row in df.iterrows():
+        vals = []
+        for col in ("eval_start_jst", "eval_end_jst"):
+            text = str(row[col]).strip()
+            if not text:
+                vals.append(pd.NaT)
+                continue
+            try:
+                t = pd.Timestamp(text)
+                vals.append(t.tz_localize("Asia/Tokyo") if t.tzinfo is None else t.tz_convert("Asia/Tokyo"))
+            except (ValueError, TypeError):
+                errors.append(f"{col} を日時として読めません: {row['video_id']}（{text}）")
+                vals.append(pd.NaT)
+        if pd.isna(vals[0]) != pd.isna(vals[1]):
+            errors.append(f"評価期間は始まりと終わりの両方を書いてください: {row['video_id']}")
+        elif not pd.isna(vals[0]):
+            if vals[1] <= vals[0]:
+                errors.append(f"評価期間の終わりが始まり以前です: {row['video_id']}")
+            fs = starts[len(es)]
+            if row["is_fire"] == "1" and not pd.isna(fs) and not (vals[0] <= fs < vals[1]):
+                errors.append(f"炎上開始時刻が評価期間の外にあります: {row['video_id']}")
+        es.append(vals[0])
+        ee.append(vals[1])
+    df["eval_start"] = pd.Series(es, index=df.index, dtype="datetime64[ns, Asia/Tokyo]")
+    df["eval_end"] = pd.Series(ee, index=df.index, dtype="datetime64[ns, Asia/Tokyo]")
     df["is_fire"] = pd.to_numeric(df["is_fire"], errors="coerce").fillna(-1).astype(int)
 
     splits = df["split"].str.strip()
@@ -178,8 +210,12 @@ def evaluate_video(table: pd.DataFrame, label: pd.Series, cfg: EvalConfig | None
                    ) -> pd.DataFrame:
     """1本の動画について、検知器ごとの判定（1行＝1検知器）を返す。"""
     cfg = cfg or EvalConfig()
-    flags = detector_flags(table)
     bin_h = _bin_hours(table)
+    es, ee = label.get("eval_start"), label.get("eval_end")
+    if es is not None and ee is not None and not pd.isna(es) and not pd.isna(ee):
+        # 指標は評価期間の時間帯だけで数える（検知そのものは全履歴で計算済み）
+        table = table[(table.index >= es) & (table.index < ee)]
+    flags = detector_flags(table)
     is_fire = int(label["is_fire"]) == 1
     start = label.get("fire_start")
     start = None if start is None or pd.isna(start) else start
